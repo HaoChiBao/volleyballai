@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PlayersTracksFile } from "@volleyballai/types";
 
-const COLORS = ["#0b6e4f", "#1d4ed8", "#b45309", "#be123c", "#7c3aed", "#0f766e"];
+const COLORS = ["#ffffff", "#d4d4d4", "#a3a3a3", "#737373", "#f5f5f5", "#e5e5e5"];
 
 export function PlayerOverlay({
   mediaUrl,

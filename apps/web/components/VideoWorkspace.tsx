@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   BallTracksFile,
   Calibration,
@@ -20,7 +20,7 @@ const Court3D = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="card">
+      <div className="court3d-pane stack">
         <p className="muted">Loading 3D court…</p>
       </div>
     ),
@@ -82,6 +82,21 @@ export function VideoWorkspace({
     router.refresh();
   }, [video.id, router]);
 
+  // Upgrade older calibrations (H set, camera missing) so 3D view matches video.
+  useEffect(() => {
+    if (!calibration?.H || calibration.camera) return;
+    let cancelled = false;
+    void (async () => {
+      const res = await fetch(`/api/videos/${video.id}/reproject`, {
+        method: "POST",
+      });
+      if (!cancelled && res.ok) await reloadArtifacts();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [calibration?.H, calibration?.camera, video.id, reloadArtifacts]);
+
   return (
     <div className="stack workspace">
       <div className="row meta-line">
@@ -91,6 +106,7 @@ export function VideoWorkspace({
         <span>Players {tracks?.players.length ?? 0}</span>
         <span>Ball frames {ball?.frames.length ?? 0}</span>
         <span>Cal {calibration?.H ? "set" : "needed"}</span>
+        <span>Cam {calibration?.camera ? "matched" : "—"}</span>
       </div>
 
       <JobPanel
@@ -101,26 +117,48 @@ export function VideoWorkspace({
 
       {mediaUrl ? (
         <>
-          <AnalysisPlayer
-            mediaUrl={mediaUrl}
-            posterUrl={
-              video.has_thumb
-                ? `/api/videos/${video.id}/media?kind=thumb`
-                : undefined
-            }
-            calibration={calibration}
-            tracks={tracks}
-            ball={ball}
-            court3d={court3d}
-            onTime={setCurrentTime}
-          />
+          <section className="match-stage card">
+            <div className="match-stage-head row between">
+              <div>
+                <h2>Synced view</h2>
+                <p className="hint" style={{ margin: 0 }}>
+                  Video and 3D court share the same camera angle from your
+                  corner calibration. Ball position updates with playback.
+                </p>
+              </div>
+            </div>
+            <div className="match-stage-grid">
+              <AnalysisPlayer
+                compact
+                mediaUrl={mediaUrl}
+                posterUrl={
+                  video.has_thumb
+                    ? `/api/videos/${video.id}/media?kind=thumb`
+                    : undefined
+                }
+                calibration={calibration}
+                tracks={tracks}
+                ball={ball}
+                court3d={court3d}
+                onTime={setCurrentTime}
+              />
+              <Court3D
+                compact
+                court3d={court3d}
+                calibration={calibration}
+                tracks={tracks}
+                ball={ball}
+                currentTime={currentTime}
+              />
+            </div>
+          </section>
+
           <CalibrationEditor
             videoId={video.id}
             mediaUrl={mediaUrl}
             initial={calibration}
             onSaved={() => void reloadArtifacts()}
           />
-          <Court3D court3d={court3d} currentTime={currentTime} />
         </>
       ) : (
         <div className="card">

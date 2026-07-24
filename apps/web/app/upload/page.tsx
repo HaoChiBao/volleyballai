@@ -73,8 +73,7 @@ export default function UploadPage() {
       <div className="page-header">
         <h1>Upload</h1>
         <p className="lede">
-          Add a short volleyball clip. An analysis job starts automatically after
-          upload.
+          Add a court clip. Analysis starts automatically after upload.
         </p>
       </div>
 

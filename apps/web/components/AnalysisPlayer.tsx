@@ -13,7 +13,8 @@ import type {
 } from "@volleyballai/types";
 import type { Court3dFile } from "./Court3D";
 
-const COLORS = ["#0b6e4f", "#1d4ed8", "#b45309", "#be123c", "#7c3aed", "#0f766e"];
+/* High-contrast B/W + mid grays so tracks stay readable on video */
+const COLORS = ["#ffffff", "#d4d4d4", "#a3a3a3", "#737373", "#f5f5f5", "#e5e5e5"];
 
 function formatTime(s: number) {
   if (!Number.isFinite(s)) return "0:00";
@@ -115,6 +116,7 @@ export function AnalysisPlayer({
   ball,
   court3d,
   onTime,
+  compact,
 }: {
   mediaUrl: string;
   posterUrl?: string;
@@ -123,6 +125,8 @@ export function AnalysisPlayer({
   ball: BallTracksFile | null;
   court3d: Court3dFile | null;
   onTime?: (t: number) => void;
+  /** Side-by-side pane: fill height, tighter video */
+  compact?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -183,9 +187,15 @@ export function AnalysisPlayer({
   }
 
   return (
-    <div className="card stack analysis-player">
+    <div
+      className={
+        compact
+          ? "stack analysis-player analysis-player-pane"
+          : "card stack analysis-player"
+      }
+    >
       <div className="row between">
-        <h2>Analysis player</h2>
+        <h2>{compact ? "Video" : "Analysis player"}</h2>
         <span className="meta-line">
           {tracks?.source ? `players:${tracks.source}` : "no tracks"}
           {ball?.source ? ` · ball:${ball.source}` : ""}
@@ -255,8 +265,8 @@ export function AnalysisPlayer({
             <g className="court-overlay">
               <polygon
                 points={lines[0].map((p) => `${p.x},${p.y}`).join(" ")}
-                fill="rgba(11,110,79,0.12)"
-                stroke="#0b6e4f"
+                fill="rgba(255,255,255,0.1)"
+                stroke="#ffffff"
                 strokeWidth={Math.max(2, size.w / 500)}
               />
               {lines.slice(1).map((seg, i) => (
@@ -264,9 +274,9 @@ export function AnalysisPlayer({
                   key={i}
                   points={seg.map((p) => `${p.x},${p.y}`).join(" ")}
                   fill="none"
-                  stroke={i >= 3 ? "#222" : "#f5f5f5"}
+                  stroke={i >= 3 ? "#0a0a0a" : "#ffffff"}
                   strokeWidth={Math.max(2, size.w / 550)}
-                  opacity={0.9}
+                  opacity={0.95}
                 />
               ))}
               {/* Projected 3D player feet for proportion check */}
@@ -294,8 +304,8 @@ export function AnalysisPlayer({
                         cx={img.x}
                         cy={img.y - lift}
                         r={Math.max(6, size.w / 160)}
-                        fill="#f59e0b"
-                        stroke="#fff"
+                        fill="#ffffff"
+                        stroke="#0a0a0a"
                         strokeWidth={2}
                       />
                     );
@@ -357,8 +367,8 @@ export function AnalysisPlayer({
               cy={ballFrame.xy[1]}
               r={ballFrame.r ?? 8}
               fill="none"
-              stroke="#f59e0b"
-              strokeWidth={Math.max(2, size.w / 400)}
+              stroke="#ffffff"
+              strokeWidth={Math.max(2.5, size.w / 400)}
             />
           ) : null}
         </svg>
@@ -412,8 +422,8 @@ export function AnalysisPlayer({
       </div>
 
       <p className="hint">
-        Body outlines are SAM mask contours (or mock silhouettes). Boxes are
-        optional. Court overlay projects the FIVB court through calibration.
+        Body outlines come from SAM masks. Court overlay and 3D positions require
+        calibration (four corners → 18×9m FIVB court).
       </p>
     </div>
   );

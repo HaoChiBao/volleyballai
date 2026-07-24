@@ -4,6 +4,8 @@ import {
   applyHomography,
   computeHomography,
   DEFAULT_COURT_CORNERS,
+  estimateBallWorldPosition,
+  estimateCameraPoseFromHomography,
 } from "@volleyballai/court-math";
 import type {
   BallTracksFile,
@@ -25,17 +27,58 @@ export function ensureHomography(cal: Calibration): Calibration {
   return { ...cal, H };
 }
 
+export function ensureCamera(
+  cal: Calibration,
+  imageWidth?: number,
+  imageHeight?: number,
+): Calibration {
+  const withH = ensureHomography(cal);
+  if (!withH.H) return withH;
+  const w =
+    imageWidth ??
+    withH.camera?.image_width ??
+    1280;
+  const h =
+    imageHeight ??
+    withH.camera?.image_height ??
+    720;
+  try {
+    const camera = estimateCameraPoseFromHomography(withH.H, w, h);
+    return { ...withH, camera };
+  } catch {
+    return withH;
+  }
+}
+
 export async function reprojectArtifacts(
   videoId: string,
   cal: Calibration,
+  imageSize?: { width: number; height: number },
 ): Promise<void> {
-  const withH = ensureHomography(cal);
-  if (!withH.H) return;
+  let withCam = ensureCamera(
+    cal,
+    imageSize?.width,
+    imageSize?.height,
+  );
+  if (!withCam.H) return;
+
+  // Prefer stored camera image size from calibration if present
+  if (!imageSize && withCam.camera) {
+    withCam = ensureCamera(
+      withCam,
+      withCam.camera.image_width,
+      withCam.camera.image_height,
+    );
+  }
 
   const dir = videoDir(videoId);
   const tracksPath = path.join(dir, "players.tracks.json");
   const ballPath = path.join(dir, "ball.tracks.json");
   const court3dPath = path.join(dir, "court3d.json");
+  const calPath = path.join(dir, "calibration.json");
+
+  // Persist camera onto calibration
+  await fs.writeFile(calPath, JSON.stringify(withCam, null, 2) + "\n");
 
   let tracks: PlayersTracksFile | null = null;
   try {
@@ -44,7 +87,7 @@ export async function reprojectArtifacts(
     return;
   }
 
-  const H = withH.H;
+  const H = withCam.H!;
   const players = tracks.players.map((p) => ({
     ...p,
     frames: p.frames.map((f) => {
@@ -78,6 +121,18 @@ export async function reprojectArtifacts(
       pipeline_version: PIPELINE_VERSION,
       frames: ball.frames.map((f) => {
         if (!f.xy) return f;
+        if (withCam.camera) {
+          const [X, Y, Z] = estimateBallWorldPosition(
+            withCam.camera,
+            f.xy,
+            f.r,
+            H,
+          );
+          return {
+            ...f,
+            court_xyz: [X, Y, Z] as [number, number, number],
+          };
+        }
         const court = applyHomography(H, { x: f.xy[0], y: f.xy[1] });
         const z = f.court_xyz?.[2] ?? 1.5;
         return {
@@ -138,7 +193,8 @@ export async function reprojectArtifacts(
       {
         video_id: videoId,
         pipeline_version: PIPELINE_VERSION,
-        court: withH.court,
+        court: withCam.court,
+        camera: withCam.camera ?? null,
         samples,
       },
       null,

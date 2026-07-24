@@ -36,7 +36,13 @@ export function JobPanel({
       latest && (latest.status === "queued" || latest.status === "running");
     if (active) {
       setWasActive(true);
-    } else if (wasActive && latest && (latest.status === "completed" || latest.status === "failed")) {
+    } else if (
+      wasActive &&
+      latest &&
+      (latest.status === "completed" ||
+        latest.status === "failed" ||
+        latest.status === "needs_calibration")
+    ) {
       setWasActive(false);
       onJobSettled?.();
     }
@@ -115,11 +121,19 @@ export function JobPanel({
         </button>
       </div>
 
-      <p className="hint">
-        Keep the local worker running with <code>npm run worker</code>. Pipeline:
-        normalize → track players (mock by default) → 3D samples. Then calibrate
-        corners below to project onto the court.
-      </p>
+      {latest?.status === "needs_calibration" ? (
+        <p className="hint">
+          Tracking finished. Click the four court corners below (near left → near
+          right → far right → far left) so players and ball map onto the 18×9m
+          court.
+        </p>
+      ) : (
+        <p className="hint">
+          Worker required (<code>npm run worker</code>). Pipeline: normalize →
+          Modal SAM 3.1 players → ball → 3D. Calibrate corners to place everyone
+          on the court.
+        </p>
+      )}
     </div>
   );
 }

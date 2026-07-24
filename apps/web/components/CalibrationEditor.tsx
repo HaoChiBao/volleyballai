@@ -53,6 +53,8 @@ export function CalibrationEditor({
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          image_width: size.w,
+          image_height: size.h,
           keyframes: [
             {
               t: videoRef.current?.currentTime ?? 0,
@@ -117,13 +119,16 @@ export function CalibrationEditor({
         >
           {points.map((p, i) => (
             <g key={i}>
-              <circle cx={p.x} cy={p.y} r={10} fill="#0b6e4f" />
+              <circle cx={p.x} cy={p.y} r={8} fill="#fff" stroke="#0a0a0a" strokeWidth="3" />
               <text
                 x={p.x + 14}
                 y={p.y - 10}
-                fill="#0b6e4f"
+                fill="#ffffff"
+                stroke="#0a0a0a"
+                strokeWidth="3"
+                paintOrder="stroke"
                 fontSize="28"
-                fontFamily="sans-serif"
+                fontFamily="monospace"
                 fontWeight="700"
               >
                 {i + 1}
@@ -133,9 +138,9 @@ export function CalibrationEditor({
           {points.length === 4 ? (
             <polygon
               points={points.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="rgba(11,110,79,0.15)"
-              stroke="#0b6e4f"
-              strokeWidth="4"
+              fill="rgba(255,255,255,0.12)"
+              stroke="#ffffff"
+              strokeWidth="3"
             />
           ) : null}
         </svg>

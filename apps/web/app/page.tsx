@@ -11,8 +11,7 @@ export default async function LibraryPage() {
       <div className="page-header">
         <h1>Library</h1>
         <p className="lede">
-          Your match clips and analysis runs. Upload a short video to queue a
-          job.
+          Match clips and analysis runs. Upload a court video to start tracking.
         </p>
       </div>
 

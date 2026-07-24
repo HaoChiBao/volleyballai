@@ -77,6 +77,19 @@ export interface CalibrationSegment {
   keyframe_index: number;
 }
 
+export interface CalibrationCamera {
+  position: [number, number, number];
+  R: number[];
+  t: number[];
+  fx: number;
+  fy: number;
+  cx: number;
+  cy: number;
+  image_width: number;
+  image_height: number;
+  fov_y_deg: number;
+}
+
 export interface Calibration {
   video_id: string;
   pipeline_version: string;
@@ -88,6 +101,8 @@ export interface Calibration {
   segments?: CalibrationSegment[];
   /** Row-major 3x3 homography image→court when available */
   H?: number[] | null;
+  /** Recovered camera pose for matched 3D view */
+  camera?: CalibrationCamera | null;
 }
 
 export interface TrackFrame {

@@ -29,9 +29,12 @@ export async function PUT(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  let body: Partial<Calibration>;
+  let body: Partial<Calibration> & {
+    image_width?: number;
+    image_height?: number;
+  };
   try {
-    body = (await request.json()) as Partial<Calibration>;
+    body = (await request.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
@@ -43,6 +46,17 @@ export async function PUT(
       { status: 400 },
     );
   }
+
+  const imageWidth =
+    body.image_width ??
+    video.meta.width ??
+    body.camera?.image_width ??
+    1280;
+  const imageHeight =
+    body.image_height ??
+    video.meta.height ??
+    body.camera?.image_height ??
+    720;
 
   let calibration: Calibration = {
     video_id: id,
@@ -63,7 +77,11 @@ export async function PUT(
   }
 
   await saveCalibration(id, calibration);
-  await reprojectArtifacts(id, calibration);
+  await reprojectArtifacts(id, calibration, {
+    width: imageWidth,
+    height: imageHeight,
+  });
 
-  return NextResponse.json({ calibration });
+  const saved = await getCalibration(id);
+  return NextResponse.json({ calibration: saved ?? calibration });
 }

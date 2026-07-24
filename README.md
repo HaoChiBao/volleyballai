@@ -64,13 +64,15 @@ pip install -r worker\requirements.txt
 # terminal 1 — web
 npm run dev
 
-# terminal 2 — worker (fake ~10s pipeline; polls Next API)
+# terminal 2 — worker (Modal SAM 3.1 + ball; polls Next API)
 npm run worker
 ```
 
-Open http://localhost:3000 → **Upload** a short mp4 → watch job progress on the video page.
+Open http://localhost:3000 → **Upload** a court mp4 → job runs automatically →
+calibrate 4 corners → overlays + 3D court positions.
 
-`JOB_BACKEND=local` is the default. Cloud Run Job wiring and Modal SAM come next (see [docs/LOCAL_V0.md](docs/LOCAL_V0.md)).
+Requires Modal deploy (`npm run modal:deploy`) and `.env` with `USE_MOCK_TRACKS=0`
+(see `.env.example`). `JOB_BACKEND=local` by default.
 
 ## Notion
 

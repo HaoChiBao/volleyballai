@@ -8,13 +8,9 @@ import time
 import traceback
 from pathlib import Path
 
-import httpx
-
-from worker.pipeline import run_pipeline
-
 
 def _load_dotenv() -> None:
-    """Load repo-root .env into os.environ (no python-dotenv dependency)."""
+    """Load repo-root .env into os.environ before importing pipeline."""
     env_path = Path(__file__).resolve().parents[1] / ".env"
     if not env_path.exists():
         return
@@ -25,13 +21,16 @@ def _load_dotenv() -> None:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        # .env wins for local worker so shell leftovers (e.g. USE_MOCK_TRACKS=1)
-        # do not silently keep mocks on.
         if key:
             os.environ[key] = value
 
 
+# MUST run before importing worker.pipeline (env defaults / Modal flags).
 _load_dotenv()
+
+import httpx
+
+from worker.pipeline import run_pipeline, use_mock_tracks
 
 API_BASE = os.environ.get("WORKER_API_BASE", "http://127.0.0.1:3000").rstrip("/")
 POLL_SECONDS = float(os.environ.get("WORKER_POLL_SECONDS", "2"))
@@ -62,25 +61,33 @@ def run_job(client: httpx.Client, job: dict) -> None:
             progress=max(0.0, min(1.0, progress)),
             error=None,
         )
-        print(f"[worker] {job_id} {stage} {progress:.0%}")
+        print(f"[worker] {job_id} {stage} {progress:.0%}", flush=True)
 
     try:
         result = run_pipeline(video_id, on_progress)
+        # If tracks exist but no court projection yet, surface calibration need.
+        status = "completed"
+        if not result.get("projected"):
+            status = "needs_calibration"
+
         patch_job(
             client,
             job_id,
-            status="completed",
+            status=status,
             stage="done",
             progress=1.0,
             error=None,
         )
         print(
-            f"[worker] completed job {job_id} "
-            f"(mock={result.get('mock')} pipeline={PIPELINE_VERSION})",
+            f"[worker] finished job {job_id} status={status} "
+            f"mock={result.get('mock')} players={result.get('player_count')} "
+            f"ball_frames={result.get('ball_frames')} "
+            f"src={result.get('player_source')}/{result.get('ball_source')}",
+            flush=True,
         )
     except Exception as exc:  # noqa: BLE001
-        err = f"{exc}\n{traceback.format_exc()}"
-        print(f"[worker] failed job {job_id}: {exc}", file=sys.stderr)
+        print(f"[worker] failed job {job_id}: {exc}", file=sys.stderr, flush=True)
+        traceback.print_exc()
         patch_job(
             client,
             job_id,
@@ -92,27 +99,41 @@ def run_job(client: httpx.Client, job: dict) -> None:
 
 
 def main() -> int:
-    mock = os.environ.get("USE_MOCK_TRACKS", "1") != "0"
-    print(f"[worker] polling {API_BASE} every {POLL_SECONDS}s")
-    print(f"[worker] USE_MOCK_TRACKS={'1' if mock else '0'}")
-    print("[worker] AI models are NOT loaded here - Modal only")
-    with httpx.Client(timeout=60.0) as client:
+    mock = use_mock_tracks()
+    print(f"[worker] polling {API_BASE} every {POLL_SECONDS}s", flush=True)
+    print(
+        f"[worker] USE_MOCK_TRACKS={'1' if mock else '0'} "
+        f"({'SYNTHETIC' if mock else 'Modal SAM 3.1 + ball'})",
+        flush=True,
+    )
+    if mock:
+        print(
+            "[worker] Set USE_MOCK_TRACKS=0 in .env for real tracking",
+            flush=True,
+        )
+    print("[worker] AI models are NOT loaded here — Modal only", flush=True)
+
+    # Long timeout: jobs wait on Modal GPU for many minutes.
+    with httpx.Client(timeout=httpx.Timeout(30.0, read=120.0)) as client:
         while True:
             try:
                 job = claim_job(client)
                 if job is None:
                     time.sleep(POLL_SECONDS)
                     continue
-                print(f"[worker] claimed job {job['id']} video={job['video_id']}")
+                print(
+                    f"[worker] claimed job {job['id']} video={job['video_id']}",
+                    flush=True,
+                )
                 run_job(client, job)
             except httpx.HTTPError as exc:
-                print(f"[worker] HTTP error: {exc}", file=sys.stderr)
+                print(f"[worker] HTTP error: {exc}", file=sys.stderr, flush=True)
                 time.sleep(POLL_SECONDS)
             except KeyboardInterrupt:
-                print("[worker] stopped")
+                print("[worker] stopped", flush=True)
                 return 0
             except Exception as exc:  # noqa: BLE001
-                print(f"[worker] error: {exc}", file=sys.stderr)
+                print(f"[worker] error: {exc}", file=sys.stderr, flush=True)
                 time.sleep(POLL_SECONDS)
 
 
