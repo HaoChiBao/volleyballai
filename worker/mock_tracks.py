@@ -1,6 +1,24 @@
 from __future__ import annotations
 
+import math
 from typing import Any
+
+
+def _capsule_outline(x: float, y: float, w: float, h: float, n: int = 24) -> list[list[float]]:
+    """Rough body silhouette (stadium / capsule) inside a bbox for mock overlays."""
+    cx = x + w / 2
+    cy = y + h / 2
+    rx = w * 0.42
+    ry = h * 0.48
+    pts: list[list[float]] = []
+    for i in range(n):
+        a = (2 * math.pi * i) / n
+        # Slightly pinched waist for a body-like look
+        waist = 0.85 + 0.15 * abs(math.sin(a))
+        px = cx + math.cos(a) * rx * (0.75 if abs(math.sin(a)) < 0.35 else waist)
+        py = cy + math.sin(a) * ry
+        pts.append([round(px, 1), round(py, 1)])
+    return pts
 
 
 def generate_mock_players(
@@ -38,7 +56,6 @@ def generate_mock_players(
             cy = 0.25 + ((y0 + vy * t) % 0.55)
             x = cx * width - bw / 2
             y = cy * height - bh / 2
-            # Court meters if we assume full-frame mapping (refined after calibration in UI/project)
             court_x = (cx) * 18.0
             court_y = (cy - 0.2) / 0.6 * 9.0
             court_y = max(0.0, min(9.0, court_y))
@@ -46,6 +63,7 @@ def generate_mock_players(
                 {
                     "t": round(t, 3),
                     "bbox": [round(x, 1), round(y, 1), round(bw, 1), round(bh, 1)],
+                    "outline": _capsule_outline(x, y, bw, bh),
                     "court_xy": [round(court_x, 2), round(court_y, 2)],
                 },
             )
@@ -55,6 +73,52 @@ def generate_mock_players(
         "video_id": video_id,
         "pipeline_version": pipeline_version,
         "players": players,
+        "source": "mock",
+    }
+
+
+def generate_mock_ball(
+    *,
+    video_id: str,
+    pipeline_version: str,
+    duration_s: float,
+    width: int,
+    height: int,
+    fps: float = 10.0,
+) -> dict[str, Any]:
+    """Parabolic ball path across the net for 2D/3D overlays."""
+    duration_s = max(duration_s or 5.0, 1.0)
+    width = width or 1280
+    height = height or 720
+    dt = 1.0 / fps
+    n = max(int(duration_s * fps), 5)
+    frames = []
+
+    for i in range(n):
+        t = i * dt
+        if t > duration_s:
+            break
+        # Court: left → right with bounce-like arcs
+        phase = (t / max(duration_s, 1e-3)) * math.pi * 2
+        court_x = 2.0 + (t / duration_s) * 14.0
+        court_y = 4.5 + math.sin(phase * 0.7) * 1.8
+        z = abs(math.sin(phase)) * 3.2 + 0.15
+        # Rough image projection (refined after calibration via reproject)
+        ix = (court_x / 18.0) * width * 0.7 + width * 0.15
+        iy = height * (0.75 - z * 0.08 - (court_y / 9.0) * 0.25)
+        frames.append(
+            {
+                "t": round(t, 3),
+                "xy": [round(ix, 1), round(iy, 1)],
+                "r": 8.0,
+                "court_xyz": [round(court_x, 2), round(court_y, 2), round(z, 2)],
+            },
+        )
+
+    return {
+        "video_id": video_id,
+        "pipeline_version": pipeline_version,
+        "frames": frames,
         "source": "mock",
     }
 
@@ -88,29 +152,59 @@ def project_tracks_with_homography(
     return {**tracks, "players": out_players}
 
 
+def project_ball_with_homography(
+    ball: dict[str, Any],
+    H: list[float],
+) -> dict[str, Any]:
+    """Project ball image xy → court; keep z from track or default."""
+    if len(H) != 9:
+        return ball
+
+    def apply(x: float, y: float) -> tuple[float, float]:
+        denom = H[6] * x + H[7] * y + H[8]
+        if abs(denom) < 1e-9:
+            return x, y
+        return (H[0] * x + H[1] * y + H[2]) / denom, (
+            H[3] * x + H[4] * y + H[5]
+        ) / denom
+
+    frames = []
+    for f in ball.get("frames", []):
+        xy = f.get("xy")
+        z = (f.get("court_xyz") or [0, 0, 1.5])[2]
+        if not xy:
+            frames.append(f)
+            continue
+        cx, cy = apply(float(xy[0]), float(xy[1]))
+        frames.append(
+            {
+                **f,
+                "court_xyz": [round(cx, 2), round(cy, 2), round(float(z), 2)],
+            },
+        )
+    return {**ball, "frames": frames}
+
+
 def build_court3d(
     *,
     video_id: str,
     pipeline_version: str,
     tracks: dict[str, Any],
+    ball: dict[str, Any] | None = None,
     sample_hz: float = 10.0,
 ) -> dict[str, Any]:
-    """Sample player court positions for the 3D viewer."""
+    """Sample player + ball court positions for the 3D viewer."""
     samples: list[dict[str, Any]] = []
     players = tracks.get("players") or []
-    if not players:
-        return {
-            "video_id": video_id,
-            "pipeline_version": pipeline_version,
-            "court": {"length_m": 18, "width_m": 9},
-            "samples": [],
-        }
+    ball_frames = (ball or {}).get("frames") or []
 
-    # Collect all timestamps
     times: set[float] = set()
     for p in players:
         for f in p.get("frames", []):
             times.add(float(f["t"]))
+    for f in ball_frames:
+        times.add(float(f["t"]))
+
     ordered = sorted(times)
     if not ordered:
         return {
@@ -120,12 +214,10 @@ def build_court3d(
             "samples": [],
         }
 
-    # Downsample
     step = max(1, int(round((1.0 / sample_hz) / max(ordered[1] - ordered[0], 1e-3))))
     for t in ordered[::step]:
         markers = []
         for p in players:
-            # nearest frame
             best = min(p["frames"], key=lambda f: abs(float(f["t"]) - t))
             if abs(float(best["t"]) - t) > 0.25:
                 continue
@@ -140,7 +232,20 @@ def build_court3d(
                     "z": 0.0,
                 },
             )
-        samples.append({"t": t, "players": markers})
+
+        ball_xyz = None
+        if ball_frames:
+            best_b = min(ball_frames, key=lambda f: abs(float(f["t"]) - t))
+            if abs(float(best_b["t"]) - t) <= 0.25:
+                xyz = best_b.get("court_xyz")
+                if xyz and len(xyz) >= 3:
+                    ball_xyz = {
+                        "x": xyz[0],
+                        "y": xyz[1],
+                        "z": xyz[2],
+                    }
+
+        samples.append({"t": t, "players": markers, "ball": ball_xyz})
 
     return {
         "video_id": video_id,

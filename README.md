@@ -47,7 +47,7 @@ volleyballai/
 ├── packages/types/        # Shared TS types
 ├── packages/court-math/   # Homography / PnP (no neural nets)
 ├── worker/                # Cloud Run Job image (ffmpeg + Modal client)
-├── modal/                 # All AI stages (SAM, ball, …)
+├── modal_app/             # All AI stages on Modal (SAM, ball, …)
 ├── docs/
 └── .data/                 # Local videos/jobs for mocks (gitignored)
 ```

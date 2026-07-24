@@ -449,6 +449,89 @@ video {
   background: #111827;
 }
 
+.analysis-shell {
+  position: relative;
+}
+
+.analysis-shell video {
+  max-height: 520px;
+  cursor: pointer;
+}
+
+.analysis-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.overlay-toggles {
+  gap: 0.5rem;
+}
+
+.toggle-chip {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+}
+
+.toggle-chip:hover {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.toggle-chip.active {
+  background: var(--accent-soft);
+  border-color: #9ed0ba;
+  color: var(--accent);
+}
+
+.toggle-chip:disabled {
+  opacity: 0.45;
+}
+
+.player-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.control-btn {
+  padding: 0.45rem 0.8rem;
+  font-size: 0.85rem;
+}
+
+.time-readout {
+  font-variant-numeric: tabular-nums;
+  min-width: 6.5rem;
+}
+
+.rate-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.rate-label select {
+  font-family: inherit;
+  font-size: 0.85rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.3rem 0.45rem;
+}
+
+.scrubber {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
 .error {
   color: var(--bad);
   background: #fdeeee;

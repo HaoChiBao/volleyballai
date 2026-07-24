@@ -5,7 +5,12 @@ import {
   computeHomography,
   DEFAULT_COURT_CORNERS,
 } from "@volleyballai/court-math";
-import type { Calibration, PlayersTracksFile, Point2 } from "@volleyballai/types";
+import type {
+  BallTracksFile,
+  Calibration,
+  PlayersTracksFile,
+  Point2,
+} from "@volleyballai/types";
 import { PIPELINE_VERSION } from "@volleyballai/types";
 import { videoDir } from "./paths";
 
@@ -29,6 +34,7 @@ export async function reprojectArtifacts(
 
   const dir = videoDir(videoId);
   const tracksPath = path.join(dir, "players.tracks.json");
+  const ballPath = path.join(dir, "ball.tracks.json");
   const court3dPath = path.join(dir, "court3d.json");
 
   let tracks: PlayersTracksFile | null = null;
@@ -59,12 +65,41 @@ export async function reprojectArtifacts(
   };
   await fs.writeFile(tracksPath, JSON.stringify(nextTracks, null, 2) + "\n");
 
-  const samples: { t: number; players: { track_id: number; x: number; y: number; z: number }[] }[] =
-    [];
+  let ball: BallTracksFile | null = null;
+  try {
+    ball = JSON.parse(await fs.readFile(ballPath, "utf8")) as BallTracksFile;
+  } catch {
+    ball = null;
+  }
+
+  if (ball) {
+    ball = {
+      ...ball,
+      pipeline_version: PIPELINE_VERSION,
+      frames: ball.frames.map((f) => {
+        if (!f.xy) return f;
+        const court = applyHomography(H, { x: f.xy[0], y: f.xy[1] });
+        const z = f.court_xyz?.[2] ?? 1.5;
+        return {
+          ...f,
+          court_xyz: [court.x, court.y, z] as [number, number, number],
+        };
+      }),
+    };
+    await fs.writeFile(ballPath, JSON.stringify(ball, null, 2) + "\n");
+  }
+
+  const samples: {
+    t: number;
+    players: { track_id: number; x: number; y: number; z: number }[];
+    ball: { x: number; y: number; z: number } | null;
+  }[] = [];
   const times = new Set<number>();
   for (const p of players) {
     for (const f of p.frames) times.add(f.t);
   }
+  for (const f of ball?.frames ?? []) times.add(f.t);
+
   for (const t of [...times].sort((a, b) => a - b).filter((_, i) => i % 2 === 0)) {
     const markers = [];
     for (const p of players) {
@@ -79,7 +114,22 @@ export async function reprojectArtifacts(
         z: 0,
       });
     }
-    samples.push({ t, players: markers });
+
+    let ballPos: { x: number; y: number; z: number } | null = null;
+    if (ball?.frames.length) {
+      const bestB = ball.frames.reduce((a, b) =>
+        Math.abs(a.t - t) < Math.abs(b.t - t) ? a : b,
+      );
+      if (bestB.court_xyz && Math.abs(bestB.t - t) <= 0.25) {
+        ballPos = {
+          x: bestB.court_xyz[0],
+          y: bestB.court_xyz[1],
+          z: bestB.court_xyz[2],
+        };
+      }
+    }
+
+    samples.push({ t, players: markers, ball: ballPos });
   }
 
   await fs.writeFile(

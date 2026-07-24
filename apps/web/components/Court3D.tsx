@@ -8,6 +8,7 @@ import { BoxGeometry, EdgesGeometry } from "three";
 export type Court3dSample = {
   t: number;
   players: { track_id: number; x: number; y: number; z: number }[];
+  ball?: { x: number; y: number; z: number } | null;
 };
 
 export type Court3dFile = {
@@ -41,10 +42,7 @@ function CourtMesh({ length, width }: { length: number; width: number }) {
         <boxGeometry args={[0.04, 2.4, width]} />
         <meshStandardMaterial color="#222222" transparent opacity={0.35} />
       </mesh>
-      <lineSegments
-        geometry={edges}
-        position={[length / 2, 0, width / 2]}
-      >
+      <lineSegments geometry={edges} position={[length / 2, 0, width / 2]}>
         <lineBasicMaterial color="#ffffff" />
       </lineSegments>
     </group>
@@ -61,6 +59,15 @@ function Players({ markers }: { markers: Court3dSample["players"] }) {
         </mesh>
       ))}
     </group>
+  );
+}
+
+function Ball({ ball }: { ball: { x: number; y: number; z: number } }) {
+  return (
+    <mesh position={[ball.x, ball.z, ball.y]} castShadow>
+      <sphereGeometry args={[0.12, 16, 16]} />
+      <meshStandardMaterial color="#f59e0b" />
+    </mesh>
   );
 }
 
@@ -87,7 +94,7 @@ export function Court3D({
         <h2>3D court</h2>
         <span className="meta-line">
           {sample
-            ? `${sample.players.length} players @ ${sample.t.toFixed(2)}s`
+            ? `${sample.players.length} players${sample.ball ? " + ball" : ""} @ ${sample.t.toFixed(2)}s`
             : "Calibrate to project players onto the court"}
         </span>
       </div>
@@ -100,11 +107,12 @@ export function Court3D({
           <directionalLight position={[12, 20, 8]} intensity={1.1} castShadow />
           <CourtMesh length={length} width={width} />
           {sample ? <Players markers={sample.players} /> : null}
+          {sample?.ball ? <Ball ball={sample.ball} /> : null}
           <OrbitControls makeDefault target={[length / 2, 0, width / 2]} />
         </Canvas>
       </div>
       <p className="hint">
-        Drag to orbit. Positions sync with the video timeline after calibration.
+        Drag to orbit. Ball height uses tracked z; players sit on the court plane.
       </p>
     </div>
   );

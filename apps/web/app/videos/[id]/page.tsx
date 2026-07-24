@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
+  getBallTracks,
   getCalibration,
   getCourt3d,
   getPlayersTracks,
@@ -21,10 +22,11 @@ export default async function VideoDetailPage({
   const video = await getVideo(id);
   if (!video) notFound();
 
-  const [jobs, calibration, tracks, court3d] = await Promise.all([
+  const [jobs, calibration, tracks, ball, court3d] = await Promise.all([
     listJobsForVideo(id),
     getCalibration(id),
     getPlayersTracks(id),
+    getBallTracks(id),
     getCourt3d(id),
   ]);
 
@@ -53,6 +55,7 @@ export default async function VideoDetailPage({
         initialJobs={jobs}
         initialCalibration={calibration}
         initialTracks={tracks}
+        initialBall={ball}
         initialCourt3d={(court3d as Court3dFile | null) ?? null}
       />
     </div>

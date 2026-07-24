@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import type {
+  BallTracksFile,
   Calibration,
   Job,
   PipelineStage,
@@ -280,6 +281,15 @@ export async function getPlayersTracks(
 export async function getCourt3d(videoId: string): Promise<unknown | null> {
   return readJsonFile<unknown | null>(
     path.join(videoDir(videoId), "court3d.json"),
+    null,
+  );
+}
+
+export async function getBallTracks(
+  videoId: string,
+): Promise<BallTracksFile | null> {
+  return readJsonFile<BallTracksFile | null>(
+    path.join(videoDir(videoId), "ball.tracks.json"),
     null,
   );
 }

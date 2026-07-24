@@ -1,2 +1,4 @@
 # Local worker — NO torch / SAM / ultralytics (AI runs on Modal only).
 httpx>=0.28.0
+# Optional: only needed when USE_MOCK_TRACKS=0
+modal>=0.73.0

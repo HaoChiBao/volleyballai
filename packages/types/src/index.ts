@@ -93,6 +93,8 @@ export interface Calibration {
 export interface TrackFrame {
   t: number;
   bbox: [number, number, number, number];
+  /** Body silhouette polygon in image pixels [[x,y], ...] from SAM mask */
+  outline?: [number, number][];
   court_xy?: [number, number];
 }
 
@@ -105,6 +107,23 @@ export interface PlayersTracksFile {
   video_id: string;
   pipeline_version: string;
   players: PlayerTrack[];
+  source?: "mock" | "sam3" | "sam3.1" | string;
+}
+
+export interface BallFrame {
+  t: number;
+  /** Image-space center + radius (pixels) when available */
+  xy?: [number, number];
+  r?: number;
+  /** Court meters; z is height above court */
+  court_xyz?: [number, number, number];
+}
+
+export interface BallTracksFile {
+  video_id: string;
+  pipeline_version: string;
+  frames: BallFrame[];
+  source?: "mock" | "modal" | string;
 }
 
 export const PIPELINE_VERSION = "0.1.0";

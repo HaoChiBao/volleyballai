@@ -6,10 +6,32 @@ import os
 import sys
 import time
 import traceback
+from pathlib import Path
 
 import httpx
 
 from worker.pipeline import run_pipeline
+
+
+def _load_dotenv() -> None:
+    """Load repo-root .env into os.environ (no python-dotenv dependency)."""
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        # .env wins for local worker so shell leftovers (e.g. USE_MOCK_TRACKS=1)
+        # do not silently keep mocks on.
+        if key:
+            os.environ[key] = value
+
+
+_load_dotenv()
 
 API_BASE = os.environ.get("WORKER_API_BASE", "http://127.0.0.1:3000").rstrip("/")
 POLL_SECONDS = float(os.environ.get("WORKER_POLL_SECONDS", "2"))
