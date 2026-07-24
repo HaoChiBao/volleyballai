@@ -1,0 +1,47 @@
+# Local runtime data
+.data/
+*.mp4
+!docs/**/*.mp4
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.python-version
+
+# Build / tooling
+.next/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+.coverage/
+.pytest_cache/
+.mypy_cache/
+
+# Model weights must never live in this repo (Modal only)
+*.pt
+*.pth
+*.onnx
+*.safetensors
+weights/
+models/checkpoints/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Local scratch / worker noise
+worker-out.txt
+worker-out*.txt
+*.pyc

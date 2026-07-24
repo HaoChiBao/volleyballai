@@ -1,0 +1,17 @@
+{
+  "name": "volleyballai",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @volleyballai/web",
+    "build": "npm run build -w @volleyballai/web",
+    "lint": "npm run lint -w @volleyballai/web",
+    "worker": ".venv/Scripts/python.exe -u -m worker"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

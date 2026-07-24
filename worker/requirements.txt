@@ -1,0 +1,2 @@
+# Local worker — NO torch / SAM / ultralytics (AI runs on Modal only).
+httpx>=0.28.0
