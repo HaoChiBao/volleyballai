@@ -3,7 +3,7 @@ import path from "path";
 import {
   applyHomography,
   computeHomography,
-  DEFAULT_COURT_CORNERS,
+  courtCorners,
   estimateBallWorldPosition,
   estimateCameraPoseFromHomography,
 } from "@volleyballai/court-math";
@@ -13,18 +13,24 @@ import type {
   PlayersTracksFile,
   Point2,
 } from "@volleyballai/types";
-import { PIPELINE_VERSION } from "@volleyballai/types";
+import { DEFAULT_COURT, PIPELINE_VERSION } from "@volleyballai/types";
 import { videoDir } from "./paths";
 
 export function ensureHomography(cal: Calibration): Calibration {
   const kf = cal.keyframes[0];
   if (!kf || kf.image_points.length < 4) return cal;
+  const length = cal.court?.length_m ?? DEFAULT_COURT.length_m;
+  const width = cal.court?.width_m ?? DEFAULT_COURT.width_m;
   const court =
     kf.court_points_m.length >= 4
       ? kf.court_points_m
-      : DEFAULT_COURT_CORNERS;
+      : courtCorners(length, width);
   const H = computeHomography(kf.image_points, court);
-  return { ...cal, H };
+  return {
+    ...cal,
+    court: { length_m: length, width_m: width },
+    H,
+  };
 }
 
 export function ensureCamera(
@@ -43,7 +49,15 @@ export function ensureCamera(
     withH.camera?.image_height ??
     720;
   try {
-    const camera = estimateCameraPoseFromHomography(withH.H, w, h);
+    const length = withH.court?.length_m ?? DEFAULT_COURT.length_m;
+    const width = withH.court?.width_m ?? DEFAULT_COURT.width_m;
+    const camera = estimateCameraPoseFromHomography(
+      withH.H,
+      w,
+      h,
+      length,
+      width,
+    );
     return { ...withH, camera };
   } catch {
     return withH;

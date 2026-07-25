@@ -629,6 +629,21 @@ video {
   color: var(--invert);
 }
 
+.toggle-chip.done:not(.active) {
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.court-dims input[type="number"] {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--ink);
+}
+
 .toggle-chip:disabled {
   opacity: 0.35;
 }

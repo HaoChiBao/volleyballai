@@ -87,25 +87,29 @@ function nearestBall(ball: BallTracksFile | null, t: number) {
   return frame;
 }
 
-function courtLinesImage(Hinv: number[] | null): Point2[][] {
+function courtLinesImage(
+  Hinv: number[] | null,
+  length_m = 18,
+  width_m = 9,
+): Point2[][] {
   if (!Hinv) return [];
+  const L = length_m;
+  const W = width_m;
+  const mid = L / 2;
+  const attackA = L / 3;
+  const attackB = (2 * L) / 3;
   const map = (x: number, y: number) => applyHomography(Hinv, { x, y });
-  const boundary = [
-    map(0, 0),
-    map(18, 0),
-    map(18, 9),
-    map(0, 9),
-  ];
-  const center = [map(9, 0), map(9, 9)];
-  const attackA = [map(6, 0), map(6, 9)];
-  const attackB = [map(12, 0), map(12, 9)];
-  const net = [map(9, 0), map(9, 9)];
+  const boundary = [map(0, 0), map(L, 0), map(L, W), map(0, W)];
+  const center = [map(mid, 0), map(mid, W)];
+  const attackLineA = [map(attackA, 0), map(attackA, W)];
+  const attackLineB = [map(attackB, 0), map(attackB, W)];
+  const net = [map(mid, 0), map(mid, W)];
   // Height hints for net posts (image-space uplift)
   const netTop = [
     { x: net[0].x, y: net[0].y - 40 },
     { x: net[1].x, y: net[1].y - 40 },
   ];
-  return [boundary, center, attackA, attackB, net, netTop];
+  return [boundary, center, attackLineA, attackLineB, net, netTop];
 }
 
 export function AnalysisPlayer({
@@ -148,7 +152,15 @@ export function AnalysisPlayer({
     }
   }, [calibration]);
 
-  const lines = useMemo(() => courtLinesImage(Hinv), [Hinv]);
+  const lines = useMemo(
+    () =>
+      courtLinesImage(
+        Hinv,
+        calibration?.court?.length_m ?? 18,
+        calibration?.court?.width_m ?? 9,
+      ),
+    [Hinv, calibration?.court?.length_m, calibration?.court?.width_m],
+  );
   const playerOverlays = useMemo(
     () => nearestPlayerOverlays(tracks, t),
     [tracks, t],

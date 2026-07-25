@@ -50,7 +50,7 @@ sam_image = (
         "pip install --no-cache-dir --force-reinstall 'pycocotools>=2.0.7' psutil",
         "python -c \"import pycocotools, psutil; from sam3.model_builder import build_sam3_video_predictor; print('sam3 ready')\"",
     )
-    .env({"VOLLEYBALL_SAM_IMAGE": "v6-safe-collect"})
+    .env({"VOLLEYBALL_SAM_IMAGE": "v7-chunked-sam"})
 )
 
 ball_image = (
@@ -203,8 +203,100 @@ def _collect_frame_objects(
     return found
 
 
-def _run_sam3(video_path: str, prompt: str, fps: float) -> dict[int, list[dict[str, Any]]]:
+def _ffmpeg_resample(src: Path, dst: Path, *, fps: float, max_width: int = 640) -> None:
+    """Write a low-FPS copy so SAM does not load the full native stream into VRAM."""
+    import subprocess
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # scale then fps — keeps court readable while cutting memory ~6× vs 30fps.
+    vf = f"scale='min({max_width},iw)':-2,fps={fps:.3f}"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),
+        "-an",
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "28",
+        str(dst),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
+        raise RuntimeError(
+            f"ffmpeg resample failed ({proc.returncode}): {proc.stderr[-800:]}",
+        )
+
+
+def _probe_duration_s(path: Path) -> float:
+    import subprocess
+
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        return float((proc.stdout or "").strip())
+    except ValueError:
+        return 0.0
+
+
+def _ffmpeg_slice(src: Path, dst: Path, *, start_s: float, duration_s: float) -> None:
+    import subprocess
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start_s:.3f}",
+        "-i",
+        str(src),
+        "-t",
+        f"{duration_s:.3f}",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "28",
+        str(dst),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
+        raise RuntimeError(
+            f"ffmpeg slice failed ({proc.returncode}): {proc.stderr[-800:]}",
+        )
+
+
+def _run_sam3(
+    video_path: str,
+    prompt: str,
+    fps: float,
+    *,
+    time_offset_s: float = 0.0,
+) -> dict[int, list[dict[str, Any]]]:
+    import torch
     from sam3.model_builder import build_sam3_video_predictor
+
+    # Keep VRAM from fragmenting across chunks.
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     predictor = build_sam3_video_predictor()
     start = predictor.handle_request(
@@ -232,7 +324,7 @@ def _run_sam3(video_path: str, prompt: str, fps: float) -> dict[int, list[dict[s
         )
         for response in stream:
             frame_index = int(response.get("frame_index", 0))
-            t = frame_index / max(fps, 1e-3)
+            t = time_offset_s + frame_index / max(fps, 1e-3)
             for oid, bbox, outline in _collect_frame_objects(response.get("outputs")):
                 frame: dict[str, Any] = {
                     "t": round(t, 3),
@@ -242,30 +334,46 @@ def _run_sam3(video_path: str, prompt: str, fps: float) -> dict[int, list[dict[s
                     frame["outline"] = outline
                 by_id.setdefault(oid, []).append(frame)
     except Exception as exc:  # noqa: BLE001
-        print(f"[track_players] propagate failed: {type(exc).__name__}: {exc}")
-        prompted = predictor.handle_request(
-            {
-                "type": "add_prompt",
-                "session_id": session_id,
-                "frame_index": 0,
-                "text": prompt,
-            },
-        )
-        for oid, bbox, outline in _collect_frame_objects(prompted.get("outputs")):
-            frame = {
-                "t": 0.0,
-                "bbox": [round(v, 1) for v in bbox],
-            }
-            if outline and len(outline) >= 3:
-                frame["outline"] = outline
-            by_id.setdefault(oid, []).append(frame)
+        # Raise a plain RuntimeError so the local worker (no torch) can deserialize.
+        msg = f"{type(exc).__name__}: {exc}"
+        print(f"[track_players] propagate failed: {msg}")
+        try:
+            predictor.handle_request({"type": "close_session", "session_id": session_id})
+        except Exception:
+            pass
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise RuntimeError(msg) from None
 
     try:
         predictor.handle_request({"type": "close_session", "session_id": session_id})
     except Exception:
         pass
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        # Drop predictor references before next chunk.
+        del predictor
+
     return by_id
+
+
+def _merge_track_maps(
+    parts: list[dict[int, list[dict[str, Any]]]],
+) -> dict[int, list[dict[str, Any]]]:
+    """Concatenate chunk tracks with unique ids (chunk-local ids remapped)."""
+    merged: dict[int, list[dict[str, Any]]] = {}
+    next_id = 1
+    for part in parts:
+        remap: dict[int, int] = {}
+        for oid, frames in sorted(part.items(), key=lambda kv: kv[0]):
+            if not frames:
+                continue
+            tid = next_id
+            next_id += 1
+            remap[oid] = tid
+            merged[tid] = frames
+    return merged
 
 
 @app.function(
@@ -286,10 +394,59 @@ def track_players(
     if not video_bytes:
         raise ValueError("Empty video_bytes")
 
+    # SAM 3 video loads the whole clip into VRAM — never feed native 30fps.
+    sam_fps = float(os.environ.get("SAM3_FPS", "5"))
+    sam_fps = max(2.0, min(sam_fps, float(fps) if fps else 5.0, 8.0))
+    # ~20s @ 5fps ≈ 100 frames per chunk keeps A100 comfortable.
+    chunk_s = float(os.environ.get("SAM3_CHUNK_SECONDS", "20"))
+    chunk_s = max(8.0, min(chunk_s, 45.0))
+
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "work.mp4"
-        path.write_bytes(video_bytes)
-        by_id = _run_sam3(str(path), prompt=prompt or DEFAULT_PROMPT, fps=fps)
+        root = Path(tmp)
+        src = root / "source.mp4"
+        low = root / "sam_input.mp4"
+        src.write_bytes(video_bytes)
+        print(f"[track_players] resampling to {sam_fps} fps (max_w=640)…")
+        _ffmpeg_resample(src, low, fps=sam_fps, max_width=640)
+        duration = _probe_duration_s(low)
+        print(f"[track_players] duration={duration:.1f}s chunk={chunk_s}s")
+
+        parts: list[dict[int, list[dict[str, Any]]]] = []
+        if duration <= 0:
+            parts.append(
+                _run_sam3(
+                    str(low),
+                    prompt=prompt or DEFAULT_PROMPT,
+                    fps=sam_fps,
+                ),
+            )
+        else:
+            start = 0.0
+            chunk_i = 0
+            while start < duration - 0.05:
+                slice_path = root / f"chunk_{chunk_i:03d}.mp4"
+                take = min(chunk_s, duration - start)
+                print(
+                    f"[track_players] chunk {chunk_i} "
+                    f"start={start:.1f}s len={take:.1f}s",
+                )
+                _ffmpeg_slice(low, slice_path, start_s=start, duration_s=take)
+                part = _run_sam3(
+                    str(slice_path),
+                    prompt=prompt or DEFAULT_PROMPT,
+                    fps=sam_fps,
+                    time_offset_s=start,
+                )
+                print(
+                    f"[track_players] chunk {chunk_i} "
+                    f"tracks={len(part)} frames="
+                    f"{sum(len(v) for v in part.values())}",
+                )
+                parts.append(part)
+                start += chunk_s
+                chunk_i += 1
+
+        by_id = _merge_track_maps(parts)
 
     players = [
         {"track_id": tid, "frames": frames}
@@ -301,6 +458,8 @@ def track_players(
         "players": players,
         "source": "sam3.1",
         "prompt": prompt,
+        "sam_fps": sam_fps,
+        "chunk_seconds": chunk_s,
     }
 
 

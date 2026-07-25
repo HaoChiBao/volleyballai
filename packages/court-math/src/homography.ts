@@ -77,10 +77,84 @@ export function invertHomography(H: number[]): number[] {
   return [A, D, G, B, E, Hh, C, F, I].map((v) => v / det);
 }
 
+/** Default FIVB indoor court size (meters). */
+export const DEFAULT_COURT_LENGTH_M = 18;
+export const DEFAULT_COURT_WIDTH_M = 9;
+
 /** Default FIVB court corners in meters (order: BL, BR, TR, TL). */
 export const DEFAULT_COURT_CORNERS: Point2[] = [
   { x: 0, y: 0 },
-  { x: 18, y: 0 },
-  { x: 18, y: 9 },
-  { x: 0, y: 9 },
+  { x: DEFAULT_COURT_LENGTH_M, y: 0 },
+  { x: DEFAULT_COURT_LENGTH_M, y: DEFAULT_COURT_WIDTH_M },
+  { x: 0, y: DEFAULT_COURT_WIDTH_M },
 ];
+
+export function courtCorners(
+  length_m = DEFAULT_COURT_LENGTH_M,
+  width_m = DEFAULT_COURT_WIDTH_M,
+): Point2[] {
+  return [
+    { x: 0, y: 0 },
+    { x: length_m, y: 0 },
+    { x: length_m, y: width_m },
+    { x: 0, y: width_m },
+  ];
+}
+
+/** Named court lines for manual line-drawing calibration (meters). */
+export type CourtLineId =
+  | "near"
+  | "right"
+  | "far"
+  | "left"
+  | "net"
+  | "attack_a"
+  | "attack_b";
+
+export interface CourtLineDef {
+  id: CourtLineId;
+  label: string;
+  /** Endpoint A → B in court meters */
+  a: Point2;
+  b: Point2;
+}
+
+/**
+ * Court line template in meters for a given size.
+ * Attack lines sit at 1/3 and 2/3 of length (FIVB: 6m / 12m on an 18m court).
+ */
+export function courtLinesForSize(
+  length_m = DEFAULT_COURT_LENGTH_M,
+  width_m = DEFAULT_COURT_WIDTH_M,
+): CourtLineDef[] {
+  const L = length_m;
+  const W = width_m;
+  const mid = L / 2;
+  const attackA = L / 3;
+  const attackB = (2 * L) / 3;
+  return [
+    { id: "near", label: "Near sideline", a: { x: 0, y: 0 }, b: { x: L, y: 0 } },
+    { id: "right", label: "Right endline", a: { x: L, y: 0 }, b: { x: L, y: W } },
+    { id: "far", label: "Far sideline", a: { x: L, y: W }, b: { x: 0, y: W } },
+    { id: "left", label: "Left endline", a: { x: 0, y: W }, b: { x: 0, y: 0 } },
+    { id: "net", label: "Center / net line", a: { x: mid, y: 0 }, b: { x: mid, y: W } },
+    {
+      id: "attack_a",
+      label: "Attack line (near half)",
+      a: { x: attackA, y: 0 },
+      b: { x: attackA, y: W },
+    },
+    {
+      id: "attack_b",
+      label: "Attack line (far half)",
+      a: { x: attackB, y: 0 },
+      b: { x: attackB, y: W },
+    },
+  ];
+}
+
+/** @deprecated Use courtLinesForSize(18, 9) — kept for imports. */
+export const FIVB_COURT_LINES: CourtLineDef[] = courtLinesForSize(
+  DEFAULT_COURT_LENGTH_M,
+  DEFAULT_COURT_WIDTH_M,
+);

@@ -42,7 +42,7 @@ export async function PUT(
   const keyframes = body.keyframes ?? [];
   if (!keyframes[0] || keyframes[0].image_points.length < 4) {
     return NextResponse.json(
-      { error: "Need 4 image corner points" },
+      { error: "Need at least 4 points from drawn court lines" },
       { status: 400 },
     );
   }

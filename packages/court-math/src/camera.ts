@@ -84,6 +84,8 @@ export function estimateCameraPoseFromHomography(
   H_image_to_court: number[],
   imageWidth: number,
   imageHeight: number,
+  courtLengthM = 18,
+  courtWidthM = 9,
 ): CameraPose {
   const H_court_to_image = invertHomography(H_image_to_court);
   const { fx, fy, cx, cy, fov_y_deg } = guessIntrinsics(imageWidth, imageHeight);
@@ -117,7 +119,11 @@ export function estimateCameraPoseFromHomography(
   let t: [number, number, number] = [m3[0] * lam, m3[1] * lam, m3[2] * lam];
 
   // Ensure camera looks toward court center (positive depth)
-  const centerCourt: [number, number, number] = [9, 4.5, 0];
+  const centerCourt: [number, number, number] = [
+    courtLengthM / 2,
+    courtWidthM / 2,
+    0,
+  ];
   const inCam = matVec3(R, centerCourt);
   const zCam = inCam[2] + t[2];
   if (zCam < 0) {

@@ -32,13 +32,17 @@ def track_players_modal(
     pipeline_version = os.environ.get("PIPELINE_VERSION", "0.1.0")
 
     track_fn = _modal_fn(app_name, fn_name)
-    result = track_fn.remote(
-        video_bytes=work_mp4.read_bytes(),
-        video_id=video_id,
-        prompt=prompt,
-        fps=fps,
-        pipeline_version=pipeline_version,
-    )
+    try:
+        result = track_fn.remote(
+            video_bytes=work_mp4.read_bytes(),
+            video_id=video_id,
+            prompt=prompt,
+            fps=fps,
+            pipeline_version=pipeline_version,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Avoid Modal remote torch exception deserialization on the laptop.
+        raise RuntimeError(f"Modal track_players failed: {exc}") from None
     if not isinstance(result, dict) or "players" not in result:
         raise RuntimeError("Modal track_players returned unexpected payload")
     return result
