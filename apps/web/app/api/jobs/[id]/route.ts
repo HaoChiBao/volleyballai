@@ -38,6 +38,9 @@ export async function PATCH(
     patch.cloud_run_execution_name =
       (body.cloud_run_execution_name as string | null) ?? null;
   }
+  if ("run" in body && (body.run === null || typeof body.run === "object")) {
+    patch.run = body.run as never;
+  }
 
   const job = await updateJob(id, patch);
 

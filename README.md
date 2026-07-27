@@ -1,6 +1,6 @@
 # Volleyball AI
 
-Offline volleyball video analysis: upload a court video, calibrate the camera, track players (SAM 3.1 on Modal), track the ball, detect actions, count score, and view a 3D court.
+Offline volleyball video analysis: upload a court video, detect court keypoints, calibrate the camera, track players (SAM 3.1 on Modal), track the ball, detect actions, count score, and view a 3D court.
 
 **Status:** greenfield planning. Implementation starts with **Local v0** (Next.js + **Cloud Run Jobs** for analysis + **Modal** for all AI).
 
@@ -20,7 +20,9 @@ See [docs/AI_POLICY.md](docs/AI_POLICY.md) · [docs/JOBS.md](docs/JOBS.md).
 | Analysis jobs | **Google Cloud Run Jobs** |
 | AI / GPU | Modal |
 | Data (later) | Supabase (Auth, Postgres, Storage) |
+| Court keypoints | YOLOv11n-pose / volley-ref-ai (on Modal) |
 | Player tracking | Meta SAM 3.1 (on Modal) |
+| Ball tracking | VballNet (on Modal) |
 | 3D viewer | React Three Fiber |
 | Video | ffmpeg in job container (+ yt-dlp later) |
 
@@ -64,12 +66,12 @@ pip install -r worker\requirements.txt
 # terminal 1 — web
 npm run dev
 
-# terminal 2 — worker (Modal SAM 3.1 + ball; polls Next API)
+# terminal 2 — worker (Modal court + SAM 3.1 + ball; polls Next API)
 npm run worker
 ```
 
 Open http://localhost:3000 → **Upload** a court mp4 → job runs automatically →
-calibrate 4 corners → overlays + 3D court positions.
+court keypoints + tracks → calibrate lines → overlays + 3D court positions.
 
 Requires Modal deploy (`npm run modal:deploy`) and `.env` with `USE_MOCK_TRACKS=0`
 (see `.env.example`). `JOB_BACKEND=local` by default.

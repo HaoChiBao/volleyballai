@@ -16,6 +16,7 @@ import type {
   CalibrationCamera,
   PlayersTracksFile,
 } from "@volleyballai/types";
+import { bracketFrames, lerp } from "@/lib/trackInterp";
 
 export type Court3dSample = {
   t: number;
@@ -147,42 +148,54 @@ function MatchedCamera({
   return null;
 }
 
-function nearestPlayers(
+function interpolatePlayers(
   tracks: PlayersTracksFile | null,
   t: number,
 ): { track_id: number; x: number; y: number; z: number }[] {
   if (!tracks) return [];
   const out: { track_id: number; x: number; y: number; z: number }[] = [];
   for (const p of tracks.players) {
-    if (!p.frames.length) continue;
-    const frame = p.frames.reduce((a, b) =>
-      Math.abs(a.t - t) < Math.abs(b.t - t) ? a : b,
-    );
-    if (Math.abs(frame.t - t) > 0.35 || !frame.court_xy) continue;
-    out.push({
-      track_id: p.track_id,
-      x: frame.court_xy[0],
-      y: frame.court_xy[1],
-      z: 0,
-    });
+    const withCourt = p.frames.filter((f) => f.court_xy != null);
+    if (!withCourt.length) continue;
+    const br = bracketFrames(withCourt, t, 0.45);
+    if (!br) continue;
+    if (br.kind === "lerp") {
+      const a = br.a.court_xy!;
+      const b = br.b.court_xy!;
+      out.push({
+        track_id: p.track_id,
+        x: lerp(a[0], b[0], br.u),
+        y: lerp(a[1], b[1], br.u),
+        z: 0,
+      });
+    } else {
+      const xy = br.frame.court_xy!;
+      out.push({ track_id: p.track_id, x: xy[0], y: xy[1], z: 0 });
+    }
   }
   return out;
 }
 
-function nearestBall(
+function interpolateBall3d(
   ball: BallTracksFile | null,
   t: number,
 ): { x: number; y: number; z: number } | null {
   if (!ball?.frames.length) return null;
-  const frame = ball.frames.reduce((a, b) =>
-    Math.abs(a.t - t) < Math.abs(b.t - t) ? a : b,
-  );
-  if (Math.abs(frame.t - t) > 0.35 || !frame.court_xyz) return null;
-  return {
-    x: frame.court_xyz[0],
-    y: frame.court_xyz[1],
-    z: frame.court_xyz[2],
-  };
+  const frames = ball.frames.filter((f) => f.court_xyz != null);
+  if (!frames.length) return null;
+  const br = bracketFrames(frames, t, 0.2);
+  if (!br) return null;
+  if (br.kind === "lerp") {
+    const a = br.a.court_xyz!;
+    const b = br.b.court_xyz!;
+    return {
+      x: lerp(a[0], b[0], br.u),
+      y: lerp(a[1], b[1], br.u),
+      z: lerp(a[2], b[2], br.u),
+    };
+  }
+  const xyz = br.frame.court_xyz!;
+  return { x: xyz[0], y: xyz[1], z: xyz[2] };
 }
 
 export function Court3D({
@@ -206,14 +219,15 @@ export function Court3D({
     return cam ? toPose(cam) : null;
   }, [calibration?.camera, court3d?.camera]);
 
-  const [matchView, setMatchView] = useState(true);
+  // Orbit free by default so the side pane is always draggable; matched cam is opt-in.
+  const [matchView, setMatchView] = useState(false);
 
   const livePlayers = useMemo(
-    () => nearestPlayers(tracks ?? null, currentTime),
+    () => interpolatePlayers(tracks ?? null, currentTime),
     [tracks, currentTime],
   );
   const liveBall = useMemo(
-    () => nearestBall(ball ?? null, currentTime),
+    () => interpolateBall3d(ball ?? null, currentTime),
     [ball, currentTime],
   );
 
@@ -245,13 +259,18 @@ export function Court3D({
   return (
     <div className={compact ? "court3d-pane stack" : "card stack"}>
       <div className="row between">
-        <h2>{compact ? "3D (matched view)" : "3D court"}</h2>
+        <h2>{compact ? "3D court" : "3D court"}</h2>
         <div className="row" style={{ gap: "0.5rem" }}>
           {cameraPose ? (
             <button
               type="button"
               className={`toggle-chip${matchView ? " active" : ""}`}
               onClick={() => setMatchView((v) => !v)}
+              title={
+                matchView
+                  ? "Switch to free orbit (drag to look around)"
+                  : "Lock camera to the video viewpoint"
+              }
             >
               {matchView ? "Matched cam" : "Orbit free"}
             </button>
@@ -259,6 +278,7 @@ export function Court3D({
           <span className="meta-line">
             {markers.length} players
             {ballPos ? " + ball" : ""} @ {currentTime.toFixed(2)}s
+            {!matchView ? " · drag to orbit" : ""}
           </span>
         </div>
       </div>
@@ -266,14 +286,29 @@ export function Court3D({
         className="video-shell court3d-canvas"
         style={
           compact
-            ? { flex: 1, minHeight: 280, background: "#e8e8e8" }
-            : { height: 360, background: "#e8e8e8" }
+            ? {
+                flex: 1,
+                minHeight: 280,
+                background: "#e8e8e8",
+                touchAction: "none",
+                cursor: matchView ? "default" : "grab",
+              }
+            : {
+                height: 360,
+                background: "#e8e8e8",
+                touchAction: "none",
+                cursor: matchView ? "default" : "grab",
+              }
         }
       >
         <Canvas
           shadows
           camera={{ position: defaultPos, fov: defaultFov }}
           style={{ width: "100%", height: "100%" }}
+          // Keep R3F from swallowing scroll on the page; orbit uses pointer drag.
+          onPointerDown={(e) => {
+            (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+          }}
         >
           <ambientLight intensity={0.75} />
           <directionalLight position={[12, 20, 8]} intensity={1.1} castShadow />
@@ -286,16 +321,25 @@ export function Court3D({
           <OrbitControls
             makeDefault
             enabled={!matchView || !cameraPose}
+            enableRotate
+            enablePan
+            enableZoom
             target={lookTarget as [number, number, number]}
             enableDamping
+            dampingFactor={0.08}
+            minDistance={3}
+            maxDistance={60}
+            maxPolarAngle={Math.PI * 0.49}
           />
         </Canvas>
       </div>
       {!compact ? (
         <p className="hint">
           {cameraPose
-            ? "Matched camera uses the same view as the video (from court calibration). Toggle Orbit free to inspect."
-            : "Calibrate 4 court corners to recover the video camera and place the ball in 3D."}
+            ? matchView
+              ? "Matched camera locks to the video viewpoint. Click Orbit free to drag/pan/zoom."
+              : "Drag to orbit, right-drag or two-finger to pan, scroll to zoom. Toggle Matched cam to lock to the video view."
+            : "Calibrate the court (YOLO keypoints or manual lines) to recover the video camera and place the ball in 3D."}
         </p>
       ) : null}
     </div>

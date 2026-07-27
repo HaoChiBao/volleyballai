@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { PlayersTracksFile } from "@volleyballai/types";
+import type { PlayersTracksFile, TrackFrame } from "@volleyballai/types";
+import { bracketFrames, lerpBbox } from "@/lib/trackInterp";
 
 const COLORS = ["#ffffff", "#d4d4d4", "#a3a3a3", "#737373", "#f5f5f5", "#e5e5e5"];
+const PLAYER_MAX_GAP_S = 0.45;
 
 export function PlayerOverlay({
   mediaUrl,
@@ -36,13 +38,19 @@ export function PlayerOverlay({
     if (!tracks) return [];
     return tracks.players.map((p, idx) => {
       if (!p.frames.length) return null;
-      const frame = p.frames.reduce((a, b) =>
-        Math.abs(a.t - t) < Math.abs(b.t - t) ? a : b,
-      );
-      if (Math.abs(frame.t - t) > 0.35) return null;
+      const br = bracketFrames(p.frames, t, PLAYER_MAX_GAP_S);
+      if (!br) return null;
+      const bbox =
+        br.kind === "lerp"
+          ? lerpBbox(
+              (br.a as TrackFrame).bbox,
+              (br.b as TrackFrame).bbox,
+              br.u,
+            )
+          : (br.frame as TrackFrame).bbox;
       return {
         track_id: p.track_id,
-        bbox: frame.bbox,
+        bbox,
         color: COLORS[idx % COLORS.length],
       };
     }).filter(Boolean) as {

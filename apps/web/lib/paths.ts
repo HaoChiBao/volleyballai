@@ -30,3 +30,15 @@ export function videoDir(videoId: string): string {
 export function videoMetaPath(videoId: string): string {
   return path.join(videoDir(videoId), "meta.json");
 }
+
+export function latestRunPointerPath(videoId: string): string {
+  return path.join(videoDir(videoId), "latest_run.json");
+}
+
+export function videoRunsRoot(videoId: string): string {
+  return path.join(videoDir(videoId), "runs");
+}
+
+export function videoRunDir(videoId: string, runId: string): string {
+  return path.join(videoRunsRoot(videoId), runId);
+}

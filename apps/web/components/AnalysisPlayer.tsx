@@ -1,20 +1,38 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyHomography,
   invertHomography,
 } from "@volleyballai/court-math";
 import type {
+  BallFrame,
   BallTracksFile,
   Calibration,
   PlayersTracksFile,
   Point2,
+  TrackFrame,
 } from "@volleyballai/types";
+import {
+  formatRunDateTime,
+  formatRunDuration,
+  formatRunModels,
+} from "@/lib/formatRun";
+import {
+  bracketFrames,
+  lerp,
+  lerpBbox,
+  lerpOutline,
+} from "@/lib/trackInterp";
 import type { Court3dFile } from "./Court3D";
 
 /* High-contrast B/W + mid grays so tracks stay readable on video */
 const COLORS = ["#ffffff", "#d4d4d4", "#a3a3a3", "#737373", "#f5f5f5", "#e5e5e5"];
+
+/** SAM samples ~5fps → allow lerp across ~1 sample gap (+slack). */
+const PLAYER_MAX_GAP_S = 0.45;
+/** Ball is ~30fps but may drop frames during occlusion. */
+const BALL_MAX_GAP_S = 0.2;
 
 function formatTime(s: number) {
   if (!Number.isFinite(s)) return "0:00";
@@ -23,20 +41,43 @@ function formatTime(s: number) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
-function nearestPlayerOverlays(tracks: PlayersTracksFile | null, t: number) {
+function interpolatePlayerOverlays(tracks: PlayersTracksFile | null, t: number) {
   if (!tracks) return [];
   return tracks.players
     .map((p, idx) => {
       if (!p.frames.length) return null;
-      const frame = p.frames.reduce((a, b) =>
-        Math.abs(a.t - t) < Math.abs(b.t - t) ? a : b,
-      );
-      if (Math.abs(frame.t - t) > 0.35) return null;
+      const br = bracketFrames(p.frames, t, PLAYER_MAX_GAP_S);
+      if (!br) return null;
+
+      let bbox: [number, number, number, number];
+      let outline: [number, number][] | undefined;
+      let court_xy: [number, number] | undefined;
+
+      if (br.kind === "lerp") {
+        const a = br.a as TrackFrame;
+        const b = br.b as TrackFrame;
+        bbox = lerpBbox(a.bbox, b.bbox, br.u);
+        outline = lerpOutline(a.outline, b.outline, br.u);
+        if (a.court_xy && b.court_xy) {
+          court_xy = [
+            lerp(a.court_xy[0], b.court_xy[0], br.u),
+            lerp(a.court_xy[1], b.court_xy[1], br.u),
+          ];
+        } else {
+          court_xy = a.court_xy ?? b.court_xy;
+        }
+      } else {
+        const f = br.frame as TrackFrame;
+        bbox = f.bbox;
+        outline = f.outline;
+        court_xy = f.court_xy;
+      }
+
       return {
         track_id: p.track_id,
-        bbox: frame.bbox,
-        outline: frame.outline,
-        court_xy: frame.court_xy,
+        bbox,
+        outline,
+        court_xy,
         color: COLORS[idx % COLORS.length],
       };
     })
@@ -78,13 +119,35 @@ function outlineFromBbox(
   return pts;
 }
 
-function nearestBall(ball: BallTracksFile | null, t: number) {
+function interpolateBall(ball: BallTracksFile | null, t: number): BallFrame | null {
   if (!ball?.frames.length) return null;
-  const frame = ball.frames.reduce((a, b) =>
-    Math.abs(a.t - t) < Math.abs(b.t - t) ? a : b,
-  );
-  if (Math.abs(frame.t - t) > 0.35) return null;
-  return frame;
+  // Only interpolate detections that have image positions.
+  const frames = ball.frames.filter((f) => f.xy != null) as Array<
+    BallFrame & { xy: [number, number] }
+  >;
+  if (!frames.length) return null;
+  const br = bracketFrames(frames, t, BALL_MAX_GAP_S);
+  if (!br) return null;
+  if (br.kind === "lerp") {
+    const a = br.a;
+    const b = br.b;
+    const xy: [number, number] = [
+      lerp(a.xy[0], b.xy[0], br.u),
+      lerp(a.xy[1], b.xy[1], br.u),
+    ];
+    const r =
+      a.r != null && b.r != null ? lerp(a.r, b.r, br.u) : (a.r ?? b.r);
+    let court_xyz = a.court_xyz ?? b.court_xyz;
+    if (a.court_xyz && b.court_xyz) {
+      court_xyz = [
+        lerp(a.court_xyz[0], b.court_xyz[0], br.u),
+        lerp(a.court_xyz[1], b.court_xyz[1], br.u),
+        lerp(a.court_xyz[2], b.court_xyz[2], br.u),
+      ];
+    }
+    return { t, xy, r, court_xyz };
+  }
+  return br.frame;
 }
 
 function courtLinesImage(
@@ -133,6 +196,8 @@ export function AnalysisPlayer({
   compact?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const onTimeRef = useRef(onTime);
+  onTimeRef.current = onTime;
   const [playing, setPlaying] = useState(false);
   const [t, setT] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -142,6 +207,12 @@ export function AnalysisPlayer({
   const [showBoxes, setShowBoxes] = useState(false);
   const [showCourt3dOverlay, setShowCourt3dOverlay] = useState(true);
   const [showBall, setShowBall] = useState(true);
+
+  /** Push clock to React state + parent without a t→useEffect cascade (that trips React's max-update-depth guard when overlays are expensive). */
+  const publishTime = useCallback((next: number) => {
+    setT((prev) => (Math.abs(prev - next) < 1e-4 ? prev : next));
+    onTimeRef.current?.(next);
+  }, []);
 
   const Hinv = useMemo(() => {
     if (!calibration?.H || calibration.H.length !== 9) return null;
@@ -162,10 +233,10 @@ export function AnalysisPlayer({
     [Hinv, calibration?.court?.length_m, calibration?.court?.width_m],
   );
   const playerOverlays = useMemo(
-    () => nearestPlayerOverlays(tracks, t),
+    () => interpolatePlayerOverlays(tracks, t),
     [tracks, t],
   );
-  const ballFrame = useMemo(() => nearestBall(ball, t), [ball, t]);
+  const ballFrame = useMemo(() => interpolateBall(ball, t), [ball, t]);
   const sample3d = useMemo(() => {
     if (!court3d?.samples?.length) return null;
     return court3d.samples.reduce((a, b) =>
@@ -173,9 +244,47 @@ export function AnalysisPlayer({
     );
   }, [court3d, t]);
 
+  // Sync overlays to the video clock every animation frame while playing
+  // (timeupdate alone is ~4–10Hz and makes tracks look lagged).
   useEffect(() => {
-    onTime?.(t);
-  }, [t, onTime]);
+    const el = videoRef.current;
+    if (!el) return;
+    let raf = 0;
+    const tick = () => {
+      publishTime(el.currentTime);
+      if (!el.paused && !el.ended) {
+        raf = requestAnimationFrame(tick);
+      }
+    };
+    const onPlay = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(tick);
+      setPlaying(true);
+    };
+    const onPause = () => {
+      cancelAnimationFrame(raf);
+      publishTime(el.currentTime);
+      setPlaying(false);
+    };
+    const onSeekOrTimeUpdate = () => {
+      // While playing, RAF owns the clock; timeupdate is only a fallback when paused.
+      if (el.paused) publishTime(el.currentTime);
+    };
+    el.addEventListener("play", onPlay);
+    el.addEventListener("pause", onPause);
+    el.addEventListener("ended", onPause);
+    el.addEventListener("seeked", onSeekOrTimeUpdate);
+    el.addEventListener("timeupdate", onSeekOrTimeUpdate);
+    if (!el.paused) onPlay();
+    return () => {
+      cancelAnimationFrame(raf);
+      el.removeEventListener("play", onPlay);
+      el.removeEventListener("pause", onPause);
+      el.removeEventListener("ended", onPause);
+      el.removeEventListener("seeked", onSeekOrTimeUpdate);
+      el.removeEventListener("timeupdate", onSeekOrTimeUpdate);
+    };
+  }, [mediaUrl, publishTime]);
 
   function togglePlay() {
     const el = videoRef.current;
@@ -188,7 +297,7 @@ export function AnalysisPlayer({
     const el = videoRef.current;
     if (!el) return;
     el.currentTime = Math.max(0, Math.min(el.duration || next, next));
-    setT(el.currentTime);
+    publishTime(el.currentTime);
   }
 
   function setPlaybackRate(next: number) {
@@ -209,8 +318,19 @@ export function AnalysisPlayer({
       <div className="row between">
         <h2>{compact ? "Video" : "Analysis player"}</h2>
         <span className="meta-line">
-          {tracks?.source ? `players:${tracks.source}` : "no tracks"}
-          {ball?.source ? ` · ball:${ball.source}` : ""}
+          {tracks?.run?.started_at
+            ? `run ${formatRunDateTime(tracks.run.started_at)}${
+                tracks.run.finished_at
+                  ? ` → ${formatRunDateTime(tracks.run.finished_at)} (${formatRunDuration(
+                      tracks.run.started_at,
+                      tracks.run.finished_at,
+                      tracks.run.duration_s,
+                    )})`
+                  : ""
+              } · ${formatRunModels(tracks.run)}`
+            : tracks?.source
+              ? `players:${tracks.source}${ball?.source ? ` · ball:${ball.source}` : ""}`
+              : "no tracks"}
         </span>
       </div>
 
@@ -254,10 +374,6 @@ export function AnalysisPlayer({
           poster={posterUrl}
           playsInline
           onClick={togglePlay}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          onTimeUpdate={(e) => setT(e.currentTarget.currentTime)}
-          onSeeked={(e) => setT(e.currentTarget.currentTime)}
           onLoadedMetadata={(e) => {
             const el = e.currentTarget;
             setSize({

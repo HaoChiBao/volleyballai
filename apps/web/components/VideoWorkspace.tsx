@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   BallTracksFile,
   Calibration,
@@ -14,6 +14,11 @@ import { AnalysisPlayer } from "./AnalysisPlayer";
 import { CalibrationEditor } from "./CalibrationEditor";
 import type { Court3dFile } from "./Court3D";
 import { JobPanel } from "@/app/videos/[id]/JobPanel";
+import {
+  formatRunDateTime,
+  formatRunDuration,
+  formatRunModels,
+} from "@/lib/formatRun";
 
 const Court3D = dynamic(
   () => import("./Court3D").then((m) => m.Court3D),
@@ -48,11 +53,14 @@ export function VideoWorkspace({
   const [ball, setBall] = useState(initialBall);
   const [court3d, setCourt3d] = useState(initialCourt3d);
   const [currentTime, setCurrentTime] = useState(0);
+  const triedAutoCal = useRef(false);
 
   const playKind = video.has_work ? "work" : video.has_source ? "source" : null;
   const mediaUrl = playKind
     ? `/api/videos/${video.id}/media?kind=${playKind}`
     : null;
+  const latestRun =
+    tracks?.run ?? ball?.run ?? initialJobs[0]?.run ?? null;
 
   const reloadArtifacts = useCallback(async () => {
     const [tRes, bRes, cRes, calRes] = await Promise.all([
@@ -82,20 +90,44 @@ export function VideoWorkspace({
     router.refresh();
   }, [video.id, router]);
 
-  // Upgrade older calibrations (H set, camera missing) so 3D view matches video.
+  // Prefer YOLO court keypoints for 3D when no manual calibration exists.
   useEffect(() => {
-    if (!calibration?.H || calibration.camera) return;
+    if (triedAutoCal.current) return;
+    if (calibration?.source === "manual") return;
+    if (
+      calibration?.source === "auto_keypoints" &&
+      calibration.H &&
+      calibration.camera
+    ) {
+      return;
+    }
+    triedAutoCal.current = true;
     let cancelled = false;
     void (async () => {
-      const res = await fetch(`/api/videos/${video.id}/reproject`, {
+      const res = await fetch(`/api/videos/${video.id}/calibrate-auto`, {
         method: "POST",
       });
-      if (!cancelled && res.ok) await reloadArtifacts();
+      if (!cancelled && res.ok) {
+        await reloadArtifacts();
+        return;
+      }
+      if (!cancelled && calibration?.H && !calibration.camera) {
+        const r2 = await fetch(`/api/videos/${video.id}/reproject`, {
+          method: "POST",
+        });
+        if (r2.ok) await reloadArtifacts();
+      }
     })();
     return () => {
       cancelled = true;
     };
-  }, [calibration?.H, calibration?.camera, video.id, reloadArtifacts]);
+  }, [
+    calibration?.source,
+    calibration?.H,
+    calibration?.camera,
+    video.id,
+    reloadArtifacts,
+  ]);
 
   return (
     <div className="stack workspace">
@@ -105,9 +137,54 @@ export function VideoWorkspace({
         <span>Thumb {video.has_thumb ? "ready" : "pending"}</span>
         <span>Players {tracks?.players.length ?? 0}</span>
         <span>Ball frames {ball?.frames.length ?? 0}</span>
-        <span>Cal {calibration?.H ? "set" : "needed"}</span>
+        <span>
+          Cal{" "}
+          {calibration?.H
+            ? calibration.source === "auto_keypoints"
+              ? "auto (YOLO)"
+              : calibration.source === "manual"
+                ? "manual"
+                : "set"
+            : "needed"}
+        </span>
         <span>Cam {calibration?.camera ? "matched" : "—"}</span>
       </div>
+      {latestRun?.started_at ? (
+        <div className="stack" style={{ gap: "0.15rem" }}>
+          <div className="row meta-line">
+            <span>
+              Started{" "}
+              <strong>{formatRunDateTime(latestRun.started_at)}</strong>
+            </span>
+            {latestRun.finished_at ? (
+              <span>
+                Finished{" "}
+                <strong>{formatRunDateTime(latestRun.finished_at)}</strong>
+              </span>
+            ) : (
+              <span>Finished —</span>
+            )}
+            <span>
+              Duration{" "}
+              <strong>
+                {formatRunDuration(
+                  latestRun.started_at,
+                  latestRun.finished_at,
+                  latestRun.duration_s,
+                )}
+              </strong>
+            </span>
+            {latestRun.run_id ? (
+              <span>
+                <code>runs/{latestRun.run_id}</code>
+              </span>
+            ) : null}
+          </div>
+          <div className="row meta-line">
+            <span>{formatRunModels(latestRun)}</span>
+          </div>
+        </div>
+      ) : null}
 
       <JobPanel
         videoId={video.id}
@@ -122,8 +199,8 @@ export function VideoWorkspace({
               <div>
                 <h2>Synced view</h2>
                 <p className="hint" style={{ margin: 0 }}>
-                  Video and 3D court share the same camera angle from your
-                  corner calibration. Ball position updates with playback.
+                  Video and 3D court share the camera from court keypoints
+                  (YOLO) or your manual lines. Ball updates with playback.
                 </p>
               </div>
             </div>

@@ -14,10 +14,21 @@ import { DEFAULT_COURT, PIPELINE_VERSION } from "@volleyballai/types";
 import {
   dataRoot,
   jobsPath,
+  latestRunPointerPath,
   videoDir,
   videoMetaPath,
+  videoRunDir,
   videosRoot,
 } from "./paths";
+
+export type LatestRunPointer = {
+  run_id: string;
+  started_at?: string;
+  finished_at?: string | null;
+  duration_s?: number | null;
+  relative_dir?: string;
+  pipeline_version?: string;
+};
 
 async function ensureDataDirs(): Promise<void> {
   await fs.mkdir(videosRoot(), { recursive: true });
@@ -188,6 +199,7 @@ export async function updateJob(
       | "error"
       | "retryable"
       | "cloud_run_execution_name"
+      | "run"
     >
   >,
 ): Promise<Job | null> {
@@ -220,13 +232,27 @@ export async function claimNextQueuedJob(): Promise<Job | null> {
     (j) => j.status === "queued" || isStaleRunning(j),
   );
   if (idx < 0) return null;
+  const claimedAt = nowIso();
   jobs[idx] = {
     ...jobs[idx],
     status: "running",
     stage: "ingest" satisfies PipelineStage,
     progress: 0.01,
     error: null,
-    updated_at: nowIso(),
+    updated_at: claimedAt,
+    run: {
+      run_id: null,
+      started_at: claimedAt,
+      finished_at: null,
+      duration_s: null,
+      relative_dir: null,
+      pipeline_version: jobs[idx].pipeline_version || PIPELINE_VERSION,
+      models: {
+        players: "pending",
+        ball: "pending",
+        court: "pending",
+      },
+    },
   };
   await writeJsonFile(jobsPath(), jobs);
   return jobs[idx];
@@ -244,9 +270,53 @@ export function filePathForVideoAsset(
   return path.join(videoDir(videoId), names[kind]);
 }
 
+export async function getLatestRunPointer(
+  videoId: string,
+): Promise<LatestRunPointer | null> {
+  return readJsonFile<LatestRunPointer | null>(
+    latestRunPointerPath(videoId),
+    null,
+  );
+}
+
+/**
+ * Resolve the directory that holds the current analysis artifacts.
+ * Prefers `runs/{run_id}/` via latest_run.json; falls back to video root
+ * for older layouts that wrote files flat.
+ */
+export async function resolveArtifactDir(videoId: string): Promise<string> {
+  const pointer = await getLatestRunPointer(videoId);
+  if (pointer?.run_id) {
+    const dir = videoRunDir(videoId, pointer.run_id);
+    try {
+      await fs.access(dir);
+      return dir;
+    } catch {
+      /* fall through */
+    }
+  }
+  return videoDir(videoId);
+}
+
+async function readArtifactJson<T>(
+  videoId: string,
+  filename: string,
+): Promise<T | null> {
+  const artifactDir = await resolveArtifactDir(videoId);
+  const primary = path.join(artifactDir, filename);
+  const fromPrimary = await readJsonFile<T | null>(primary, null);
+  if (fromPrimary) return fromPrimary;
+  // Legacy flat layout / mid-migration
+  if (artifactDir !== videoDir(videoId)) {
+    return readJsonFile<T | null>(path.join(videoDir(videoId), filename), null);
+  }
+  return null;
+}
+
 export async function getCalibration(
   videoId: string,
 ): Promise<Calibration | null> {
+  // Calibration stays video-scoped (shared across runs).
   return readJsonFile<Calibration | null>(
     path.join(videoDir(videoId), "calibration.json"),
     null,
@@ -264,6 +334,8 @@ export async function saveCalibration(
     video_id: videoId,
     pipeline_version: calibration.pipeline_version || PIPELINE_VERSION,
     court: calibration.court ?? { ...DEFAULT_COURT },
+    source: calibration.source ?? null,
+    from_run_id: calibration.from_run_id ?? null,
   };
   await writeJsonFile(path.join(videoDir(videoId), "calibration.json"), payload);
   return payload;
@@ -272,26 +344,29 @@ export async function saveCalibration(
 export async function getPlayersTracks(
   videoId: string,
 ): Promise<PlayersTracksFile | null> {
-  return readJsonFile<PlayersTracksFile | null>(
-    path.join(videoDir(videoId), "players.tracks.json"),
-    null,
-  );
+  return readArtifactJson<PlayersTracksFile>(videoId, "players.tracks.json");
 }
 
 export async function getCourt3d(videoId: string): Promise<unknown | null> {
-  return readJsonFile<unknown | null>(
-    path.join(videoDir(videoId), "court3d.json"),
-    null,
-  );
+  return readArtifactJson<unknown>(videoId, "court3d.json");
 }
 
 export async function getBallTracks(
   videoId: string,
 ): Promise<BallTracksFile | null> {
-  return readJsonFile<BallTracksFile | null>(
-    path.join(videoDir(videoId), "ball.tracks.json"),
-    null,
-  );
+  return readArtifactJson<BallTracksFile>(videoId, "ball.tracks.json");
+}
+
+export async function getCourtKeypoints(
+  videoId: string,
+): Promise<unknown | null> {
+  return readArtifactJson<unknown>(videoId, "court.keypoints.json");
+}
+
+export async function getAnalysisRun(
+  videoId: string,
+): Promise<import("@volleyballai/types").AnalysisRunInfo | null> {
+  return readArtifactJson(videoId, "analysis.run.json");
 }
 
 export type { VideoMeta };

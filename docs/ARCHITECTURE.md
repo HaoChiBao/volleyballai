@@ -49,12 +49,13 @@ See [JOBS.md](JOBS.md).
 
 ```
 ingest / normalize     → Cloud Run Job (ffmpeg)
-calibrate (user edit)  → Next.js UI
-track_players          → Modal (SAM 3.1), invoked by job
-track_repair           → Modal, invoked by job or dedicated execution
-track_ball             → Modal (later)
+detect_court           ─┐
+track_players (SAM)    ├→ Modal in parallel (spawn ‖ wait)
+track_ball (VballNet)  ─┘
+auto-calibrate         → Job CPU from court keypoints (manual UI override OK)
+track_repair           → Modal, on demand
 actions / score        → Modal + UI edits (later)
-project_3d             → Job CPU math (preferred) or Modal if heavy
+project_3d             → Job CPU math
 ```
 
 ## Design principles

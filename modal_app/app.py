@@ -1,15 +1,17 @@
 """
-Volleyball AI — Modal app (SAM 3.1 players + ball tracker).
+Volleyball AI — Modal app (SAM 3.1 players + VballNet ball + court keypoints).
 
 Deploy:
-  modal deploy modal/app.py
+  modal deploy modal_app/app.py
 
 Requires secret: `huggingface` with HF_TOKEN (access to facebook/sam3 / sam3.1).
+
+Court keypoints weights (MIT) are baked into the court image from
+Hugging Face `Davidsv/volley-ref-ai` (yolo_court_keypoints.pt).
 """
 
 from __future__ import annotations
 
-import math
 import os
 import tempfile
 from pathlib import Path
@@ -53,11 +55,194 @@ sam_image = (
     .env({"VOLLEYBALL_SAM_IMAGE": "v7-chunked-sam"})
 )
 
+# Best Acc@5px + 2nd-best baked into the ball image (shared by both Modal fns).
+_VBALLNET_MODELS = {
+    "v1_148": {
+        "url": (
+            "https://github.com/asigatchov/fast-volleyball-tracking-inference/raw/master/"
+            "models/VballNetV1_seq9_grayscale_148_h288_w512.onnx"
+        ),
+        "path": "/models/vballnet_v1_148.onnx",
+        "name": "VballNetV1_seq9_grayscale_148_h288_w512",
+    },
+    "v1_204": {
+        "url": (
+            "https://github.com/asigatchov/fast-volleyball-tracking-inference/raw/master/"
+            "models/VballNetV1_seq9_grayscale_204_h288_w512.onnx"
+        ),
+        "path": "/models/vballnet_v1_204.onnx",
+        "name": "VballNetV1_seq9_grayscale_204_h288_w512",
+    },
+}
+_VBALLNET_DEFAULT_KEY = "v1_148"
+_VBALLNET_MODEL_PATH = _VBALLNET_MODELS[_VBALLNET_DEFAULT_KEY]["path"]
+
+_ball_fetch_cmds = [
+    "mkdir -p /models",
+    *[
+        f"curl -fsSL -o {m['path']} {m['url']} && "
+        f"test $(stat -c%s {m['path']}) -gt 10000"
+        for m in _VBALLNET_MODELS.values()
+    ],
+    "ls -la /models && "
+    "python -c \"import onnxruntime, cv2, numpy; print('ball deps ok', onnxruntime.__version__)\"",
+]
+
 ball_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("ffmpeg", "libgl1", "libglib2.0-0")
-    .pip_install("numpy", "opencv-python-headless")
+    .apt_install("ffmpeg", "libgl1", "libglib2.0-0", "curl", "ca-certificates")
+    .pip_install(
+        "numpy",
+        "opencv-python-headless==4.10.0.84",
+        "onnxruntime==1.20.1",
+    )
+    .env(
+        {
+            "VBALLNET_MODEL_PATH": _VBALLNET_MODEL_PATH,
+            "VBALLNET_MODEL_KEY": _VBALLNET_DEFAULT_KEY,
+        },
+    )
+    .run_commands(*_ball_fetch_cmds)
+    # Must be last image step (Modal mounts local files at container start).
+    .add_local_file(
+        str(Path(__file__).parent / "vballnet.py"),
+        remote_path="/root/vballnet.py",
+    )
 )
+
+# Court models (all on Modal — never on the laptop):
+#  1) volley-ref YOLOv11n-pose (14 kpts) — current production baseline
+#  2) Kaggle YOLOv8x-pose (4 corners) — fetched via secret `kaggle` / Volume
+#  3) TennisCourtDetector heatmap (14 tennis kpts) — baked via gdown
+_COURT_MODEL_URL = (
+    "https://huggingface.co/Davidsv/volley-ref-ai/resolve/main/yolo_court_keypoints.pt"
+)
+_COURT_MODEL_PATH = "/models/yolo_court_keypoints.pt"
+_KAGGLE_COURT_MODEL_PATH = "/models/key_points_regression_model.pt"
+_TENNIS_COURT_MODEL_PATH = "/models/tennis_court_detector.pth"
+_TENNIS_GDRIVE = "https://drive.google.com/uc?id=1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG"
+
+court_models_volume = modal.Volume.from_name("court-extra-models", create_if_missing=True)
+
+court_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("ffmpeg", "libgl1", "libglib2.0-0", "curl", "ca-certificates")
+    .pip_install(
+        "torch",
+        "torchvision",
+        index_url="https://download.pytorch.org/whl/cpu",
+    )
+    .pip_install(
+        "ultralytics>=8.3.0",
+        "opencv-python-headless==4.10.0.84",
+        "numpy",
+        "huggingface_hub",
+        "gdown",
+        "kagglehub",
+    )
+    .env(
+        {
+            "COURT_MODEL_PATH": _COURT_MODEL_PATH,
+            "KAGGLE_COURT_MODEL_PATH": _KAGGLE_COURT_MODEL_PATH,
+            "TENNIS_COURT_MODEL_PATH": _TENNIS_COURT_MODEL_PATH,
+            "COURT_MODELS_DIR": "/models",
+        },
+    )
+    .run_commands(
+        "mkdir -p /models",
+        f"curl -fsSL -L -o {_COURT_MODEL_PATH} {_COURT_MODEL_URL} && "
+        f"test $(stat -c%s {_COURT_MODEL_PATH}) -gt 1000000",
+        "python -c \""
+        "from ultralytics import YOLO; "
+        f"m=YOLO('{_COURT_MODEL_PATH}'); "
+        "print('volley-ref court model ready', m.task)\"",
+        # Bake TennisCourtDetector weights (public Drive link from upstream README).
+        "python -c \""
+        "import gdown; "
+        f"gdown.download('{_TENNIS_GDRIVE}', '{_TENNIS_COURT_MODEL_PATH}', quiet=False); "
+        f"import os; assert os.path.getsize('{_TENNIS_COURT_MODEL_PATH}') > 1_000_000\"",
+        "ls -la /models",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "court_keypoints.py"),
+        remote_path="/root/court_keypoints.py",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "court_normalize.py"),
+        remote_path="/root/court_normalize.py",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "court_tennis_detector.py"),
+        remote_path="/root/court_tennis_detector.py",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "court_kaggle_yolo.py"),
+        remote_path="/root/court_kaggle_yolo.py",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "court_compare.py"),
+        remote_path="/root/court_compare.py",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "fetch_court_weights.py"),
+        remote_path="/root/fetch_court_weights.py",
+    )
+)
+
+
+def _run_ball_track(
+    video_bytes: bytes,
+    *,
+    video_id: str,
+    pipeline_version: str,
+    mode: str,
+    model_key: str,
+    label: str,
+) -> dict:
+    """Shared VballNet runner for quality / fast Modal functions."""
+    import sys
+
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from vballnet import MODEL_CATALOG, track_ball_vballnet  # type: ignore
+
+    if not video_bytes:
+        raise ValueError("Empty video_bytes")
+
+    key = model_key if model_key in MODEL_CATALOG else _VBALLNET_DEFAULT_KEY
+    meta = _VBALLNET_MODELS.get(key) or _VBALLNET_MODELS[_VBALLNET_DEFAULT_KEY]
+    model_path = Path(os.environ.get("VBALLNET_MODEL_PATH", meta["path"]))
+    # Prefer key-specific baked path when present.
+    key_path = Path(meta["path"])
+    if key_path.exists():
+        model_path = key_path
+    conf = float(os.environ.get("VBALLNET_CONFIDENCE", "0.5"))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "work.mp4"
+        path.write_bytes(video_bytes)
+        print(
+            f"[{label}] key={key} mode={mode} model={model_path} conf={conf}",
+        )
+        frames_out = track_ball_vballnet(
+            path,
+            model_path=model_path,
+            model_key=key,
+            confidence_threshold=conf,
+            gap_fill=True,
+            mode=mode,  # type: ignore[arg-type]
+        )
+        print(f"[{label}] detections={len(frames_out)}")
+
+    return {
+        "video_id": video_id,
+        "pipeline_version": pipeline_version,
+        "frames": frames_out,
+        "source": "vballnet",
+        "model": meta["name"],
+        "model_key": key,
+        "infer_mode": mode,
+    }
 
 
 def _mask_to_bbox_and_outline(
@@ -388,6 +573,7 @@ def track_players(
     video_id: str = "",
     prompt: str = DEFAULT_PROMPT,
     fps: float = 10.0,
+    sam_fps: float | None = None,
     pipeline_version: str = PIPELINE_VERSION,
 ) -> dict:
     """Track players with SAM 3.1. Returns players.tracks.json payload."""
@@ -395,11 +581,23 @@ def track_players(
         raise ValueError("Empty video_bytes")
 
     # SAM 3 video loads the whole clip into VRAM — never feed native 30fps.
-    sam_fps = float(os.environ.get("SAM3_FPS", "5"))
-    sam_fps = max(2.0, min(sam_fps, float(fps) if fps else 5.0, 8.0))
+    # Prefer explicit sam_fps from the worker (local SAM3_FPS), else Modal env.
+    requested = (
+        float(sam_fps)
+        if sam_fps is not None
+        else float(os.environ.get("SAM3_FPS", "5"))
+    )
+    # Allow up to 15fps when requested; still clamp for VRAM safety.
+    sam_fps_val = max(2.0, min(requested, float(fps) if fps else requested, 15.0))
     # ~20s @ 5fps ≈ 100 frames per chunk keeps A100 comfortable.
     chunk_s = float(os.environ.get("SAM3_CHUNK_SECONDS", "20"))
+    # Shorter chunks at higher fps so VRAM stays bounded (~100–120 frames).
+    if sam_fps_val >= 10:
+        chunk_s = min(chunk_s, 12.0)
+    elif sam_fps_val >= 8:
+        chunk_s = min(chunk_s, 15.0)
     chunk_s = max(8.0, min(chunk_s, 45.0))
+    sam_fps = sam_fps_val
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -463,82 +661,340 @@ def track_players(
     }
 
 
-@app.function(image=ball_image, gpu="T4", timeout=60 * 30)
+@app.function(image=ball_image, cpu=4.0, memory=8192, timeout=60 * 60)
 def track_ball(
     video_bytes: bytes,
     video_id: str = "",
     fps: float = 10.0,
     pipeline_version: str = PIPELINE_VERSION,
+    model_key: str = _VBALLNET_DEFAULT_KEY,
 ) -> dict:
-    """Track ball (motion blob). Returns ball.tracks.json payload."""
-    import cv2
-    import numpy as np
+    """
+    Best-quality ball track: VballNetV1_148 + sliding-window center-frame inference.
+
+    Returns ball.tracks.json payload: frames[{t, xy, r}].
+    """
+    _ = fps
+    return _run_ball_track(
+        video_bytes,
+        video_id=video_id,
+        pipeline_version=pipeline_version,
+        mode="quality",
+        model_key=model_key or _VBALLNET_DEFAULT_KEY,
+        label="track_ball",
+    )
+
+
+@app.function(image=ball_image, cpu=2.0, memory=4096, timeout=60 * 30)
+def track_ball_fast(
+    video_bytes: bytes,
+    video_id: str = "",
+    fps: float = 10.0,
+    pipeline_version: str = PIPELINE_VERSION,
+    model_key: str = _VBALLNET_DEFAULT_KEY,
+) -> dict:
+    """
+    Faster ball track: same VballNetV1 weights, non-overlapping seq batches.
+
+    Use when iterating quickly; prefer `track_ball` for final analysis quality.
+    """
+    _ = fps
+    return _run_ball_track(
+        video_bytes,
+        video_id=video_id,
+        pipeline_version=pipeline_version,
+        mode="fast",
+        model_key=model_key or _VBALLNET_DEFAULT_KEY,
+        label="track_ball_fast",
+    )
+
+
+@app.function(image=court_image, cpu=2.0, memory=4096, timeout=60 * 20)
+def detect_court(
+    video_bytes: bytes,
+    video_id: str = "",
+    pipeline_version: str = PIPELINE_VERSION,
+    sample_fps: float = 1.0,
+    max_frames: int = 30,
+    confidence: float = 0.55,
+    return_overlays: int = 3,
+    media_suffix: str = ".mp4",
+) -> dict:
+    """
+    Detect 14 volleyball court keypoints (YOLOv11n-pose).
+
+    Returns court.keypoints.json payload + optional JPEG overlays (base64).
+    Weights: Davidsv/volley-ref-ai (baked into image).
+    """
+    import sys
+
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from court_keypoints import detect_court_media  # type: ignore
 
     if not video_bytes:
         raise ValueError("Empty video_bytes")
 
+    model_path = Path(os.environ.get("COURT_MODEL_PATH", _COURT_MODEL_PATH))
+    suffix = media_suffix if media_suffix.startswith(".") else f".{media_suffix}"
+
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "work.mp4"
+        path = Path(tmp) / f"input{suffix}"
         path.write_bytes(video_bytes)
-        cap = cv2.VideoCapture(str(path))
-        if not cap.isOpened():
-            raise RuntimeError("Could not open video for ball tracking")
+        print(
+            f"[detect_court] model={model_path} sample_fps={sample_fps} "
+            f"max_frames={max_frames} conf={confidence}",
+        )
+        out = detect_court_media(
+            path,
+            model_path=model_path,
+            confidence=confidence,
+            sample_fps=sample_fps,
+            max_frames=max_frames,
+            return_overlays=return_overlays,
+            video_id=video_id,
+            pipeline_version=pipeline_version,
+        )
+        print(f"[detect_court] detections={out.get('detections')} frames={len(out.get('frames', []))}")
+        return out
 
-        vid_fps = cap.get(cv2.CAP_PROP_FPS) or fps or 10.0
-        frames_out: list[dict] = []
-        prev_gray = None
-        idx = 0
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (5, 5), 0)
-            t = idx / max(vid_fps, 1e-3)
-            if prev_gray is not None:
-                diff = cv2.absdiff(gray, prev_gray)
-                _, th = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
-                th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-                contours, _ = cv2.findContours(
-                    th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
-                )
-                best = None
-                best_score = 0.0
-                for c in contours:
-                    area = cv2.contourArea(c)
-                    if area < 20 or area > 2500:
-                        continue
-                    (x, y), r = cv2.minEnclosingCircle(c)
-                    circularity = area / (math.pi * r * r + 1e-6)
-                    score = circularity * min(area, 400)
-                    if score > best_score:
-                        best_score = score
-                        best = (float(x), float(y), float(r))
-                if best:
-                    frames_out.append(
-                        {
-                            "t": round(t, 3),
-                            "xy": [round(best[0], 1), round(best[1], 1)],
-                            "r": round(max(4.0, best[2]), 1),
-                        },
-                    )
-            prev_gray = gray
-            idx += 1
-        cap.release()
 
+@app.function(
+    image=court_image,
+    cpu=2.0,
+    memory=8192,
+    timeout=60 * 30,
+    volumes={"/vol/court-extra": court_models_volume},
+)
+def fetch_court_models(
+    kaggle_username: str = "",
+    kaggle_key: str = "",
+) -> dict:
+    """
+    Download TennisCourtDetector + Kaggle YOLOv8x court weights onto the
+    `court-extra-models` Volume.
+
+    Tennis weights are public. For Kaggle, pass username/key once:
+      modal run modal_app/app.py::fetch_court_models_local \\
+        --kaggle-username YOU --kaggle-key YOUR_KEY
+    or create `modal secret create kaggle KAGGLE_USERNAME=… KAGGLE_KEY=…`
+    and wire the secret onto this function later.
+    """
+    import sys
+
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+
+    if kaggle_username:
+        os.environ["KAGGLE_USERNAME"] = kaggle_username
+    if kaggle_key:
+        os.environ["KAGGLE_KEY"] = kaggle_key
+
+    import fetch_court_weights  # type: ignore
+
+    code = fetch_court_weights.main()
+    court_models_volume.commit()
+    vol = Path("/vol/court-extra")
     return {
-        "video_id": video_id,
-        "pipeline_version": pipeline_version,
-        "frames": frames_out,
-        "source": "modal-motion",
+        "ok": code == 0,
+        "exit_code": code,
+        "volume_files": sorted(p.name for p in vol.iterdir()) if vol.exists() else [],
+        "kaggle_username_set": bool(os.environ.get("KAGGLE_USERNAME")),
     }
+
+
+@app.function(
+    image=court_image,
+    cpu=2.0,
+    memory=8192,
+    timeout=60 * 20,
+    volumes={"/vol/court-extra": court_models_volume},
+)
+def compare_court_models(
+    image_bytes: bytes,
+    video_id: str = "",
+    pipeline_version: str = PIPELINE_VERSION,
+    media_suffix: str = ".jpg",
+    models: list[str] | None = None,
+    volley_confidence: float = 0.55,
+    kaggle_confidence: float = 0.001,
+    return_overlays: bool = True,
+) -> dict:
+    """
+    Run volley-ref + Kaggle YOLOv8x + TennisCourtDetector on one image.
+
+    All results use schema `volleyball_court_v1` (normalized keypoints).
+    """
+    import sys
+
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from court_compare import compare_court_models_image  # type: ignore
+
+    if not image_bytes:
+        raise ValueError("Empty image_bytes")
+
+    wanted = tuple(models or ("volley_ref", "kaggle", "tennis"))
+    suffix = media_suffix if media_suffix.startswith(".") else f".{media_suffix}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"input{suffix}"
+        path.write_bytes(image_bytes)
+        print(f"[compare_court] models={wanted} size={len(image_bytes)}")
+        out = compare_court_models_image(
+            path,
+            video_id=video_id,
+            pipeline_version=pipeline_version,
+            volley_confidence=volley_confidence,
+            kaggle_confidence=kaggle_confidence,
+            models=wanted,
+            return_overlays=return_overlays,
+        )
+        print(
+            f"[compare_court] ok={out.get('models_ok')} errors={list((out.get('errors') or {}).keys())}",
+        )
+        return out
 
 
 @app.local_entrypoint()
 def main(video_path: str = "", prompt: str = DEFAULT_PROMPT):
     if not video_path:
-        print("Deployed app volleyball-ai with track_players + track_ball")
+        print(
+            "Deployed volleyball-ai: track_players + track_ball (+fast) + "
+            "detect_court + compare_court_models",
+        )
         return
     data = Path(video_path).read_bytes()
     out = track_players.remote(video_bytes=data, video_id="local", prompt=prompt)
     print(f"players={len(out.get('players', []))} source={out.get('source')}")
+
+
+@app.local_entrypoint()
+def fetch_court_models_local(
+    kaggle_username: str = "",
+    kaggle_key: str = "",
+):
+    """Download tennis + kaggle court weights onto the Modal Volume."""
+    result = fetch_court_models.remote(
+        kaggle_username=kaggle_username,
+        kaggle_key=kaggle_key,
+    )
+    print(result)
+
+
+@app.local_entrypoint()
+def test_court(
+    video_path: str = "",
+    out_dir: str = ".data/court-test",
+    sample_fps: float = 1.0,
+    max_frames: int = 20,
+    confidence: float = 0.55,
+):
+    """
+    Run detect_court on a local video/image and write JSON + overlay JPEGs.
+
+    Example:
+      modal run modal_app/app.py::test_court --video-path .data/videos/<id>/work.mp4
+    """
+    import base64
+    import json
+
+    if not video_path:
+        raise SystemExit(
+            "Pass --video-path to an mp4/jpg (e.g. .data/videos/<id>/work.mp4 or thumb.jpg)",
+        )
+
+    src = Path(video_path)
+    if not src.exists():
+        raise SystemExit(f"Not found: {src}")
+
+    suffix = src.suffix.lower() or ".mp4"
+    data = src.read_bytes()
+    print(f"[test_court] uploading {src} ({len(data)} bytes)…")
+    result = detect_court.remote(
+        video_bytes=data,
+        video_id=src.stem,
+        sample_fps=sample_fps,
+        max_frames=max_frames,
+        confidence=confidence,
+        return_overlays=3,
+        media_suffix=suffix,
+    )
+
+    dest = Path(out_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    json_path = dest / "court.keypoints.json"
+    # Drop heavy overlays from the saved JSON copy (keep on disk as jpgs).
+    payload = {k: v for k, v in result.items() if k != "overlays"}
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"[test_court] wrote {json_path}")
+    print(
+        f"[test_court] detections={result.get('detections')} "
+        f"sample_fps={result.get('sample_fps')} "
+        f"size={result.get('image_size')}",
+    )
+
+    for i, ov in enumerate(result.get("overlays") or []):
+        raw = base64.b64decode(ov["jpg_b64"])
+        jpg_path = dest / f"overlay_{i:02d}_t{ov.get('t', 0)}.jpg"
+        jpg_path.write_bytes(raw)
+        print(f"[test_court] wrote {jpg_path}")
+
+    # Print first-frame keypoint summary
+    frames = result.get("frames") or []
+    if frames:
+        vis = [k for k in frames[0].get("keypoints", []) if k.get("visible")]
+        print(f"[test_court] first hit: {len(vis)}/14 visible keypoints @ t={frames[0].get('t')}")
+        for k in vis[:8]:
+            print(f"  - {k['name']}: {k['xy']} conf={k['conf']}")
+    else:
+        print("[test_court] no court detections — try a clearer frame / lower --confidence")
+
+
+@app.local_entrypoint()
+def test_court_compare(
+    image_path: str = "",
+    out_dir: str = ".data/court-model-compare",
+):
+    """
+    Compare volley-ref / Kaggle / TennisCourtDetector on one image.
+
+    Example:
+      modal run modal_app/app.py::test_court_compare \\
+        --image-path .data/court-model-test/images/05_penn_state_vb.jpg
+    """
+    import base64
+    import json
+
+    if not image_path:
+        raise SystemExit("Pass --image-path to a jpg/png")
+
+    src = Path(image_path)
+    if not src.exists():
+        raise SystemExit(f"Not found: {src}")
+
+    data = src.read_bytes()
+    print(f"[test_court_compare] uploading {src} ({len(data)} bytes)…")
+    result = compare_court_models.remote(
+        image_bytes=data,
+        video_id=src.stem,
+        media_suffix=src.suffix.lower() or ".jpg",
+        return_overlays=True,
+    )
+
+    dest = Path(out_dir) / src.stem
+    dest.mkdir(parents=True, exist_ok=True)
+    slim = {k: v for k, v in result.items() if k != "results"}
+    models_out = {}
+    for mid, payload in (result.get("results") or {}).items():
+        models_out[mid] = {k: v for k, v in payload.items() if k != "overlays"}
+        for i, ov in enumerate(payload.get("overlays") or []):
+            jpg = dest / f"{mid}_overlay_{i:02d}.jpg"
+            jpg.write_bytes(base64.b64decode(ov["jpg_b64"]))
+            print(f"[test_court_compare] wrote {jpg}")
+    slim["results"] = models_out
+    (dest / "compare.json").write_text(json.dumps(slim, indent=2), encoding="utf-8")
+    print(f"[test_court_compare] wrote {dest / 'compare.json'}")
+    print("summary:", json.dumps(result.get("summary"), indent=2))
+    if result.get("errors"):
+        print("errors:", json.dumps(result.get("errors"), indent=2))

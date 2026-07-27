@@ -4,15 +4,15 @@ Ship a usable local loop:
 
 1. Upload video  
 2. Normalize (`work.mp4` + thumb) via worker/ffmpeg  
-3. Calibrate court (4 corners)  
+3. Auto court keypoints via Modal (YOLOv11n-pose)  
 4. Player tracks via Modal **SAM 3.1** (default)  
-5. Ball tracks via Modal  
-6. Calibrate 4 corners → project onto official 18×9m court  
+5. Ball tracks via Modal VballNet  
+6. Manual calibrate (draw lines) → project onto official 18×9m court  
 7. Analysis player + free-orbit 3D with players/ball  
 
 ## Out of MVP (next)
 
-- Auto court detection (still 4-click calibrate)  
+- Seed / auto-apply calibration from court keypoints  
 - Actions, score  
 - Cloud Run Job deploy  
 - YouTube ingest, auth, billing  

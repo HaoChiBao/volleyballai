@@ -79,6 +79,7 @@ export function CalibrationEditor({
   const [pending, setPending] = useState<Point2 | null>(null);
   const [size, setSize] = useState({ w: 1280, h: 720 });
   const [saving, setSaving] = useState(false);
+  const [applyingAuto, setApplyingAuto] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -138,6 +139,32 @@ export function CalibrationEditor({
     setPending(null);
   }
 
+  async function applyAutoKeypoints() {
+    setApplyingAuto(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch(
+        `/api/videos/${videoId}/calibrate-auto?force=1`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ length_m: lengthM, width_m: widthM }),
+        },
+      );
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as { calibration: Calibration };
+      setMessage(
+        "Applied YOLO court keypoints → 3D camera + player/ball projection.",
+      );
+      onSaved?.(data.calibration);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApplyingAuto(false);
+    }
+  }
+
   async function save() {
     if (!canSave) {
       setError("Draw at least 2 court lines (4 endpoints).");
@@ -189,11 +216,26 @@ export function CalibrationEditor({
       <div>
         <h2>Court calibration</h2>
         <p className="hint">
-          Set the real court size (default FIVB indoor{" "}
-          <strong>{DEFAULT_COURT.length_m}×{DEFAULT_COURT.width_m} m</strong>),
-          then draw visible lines. Homography uses those meters so camera angle
-          and player/ball positions stay accurate.
+          3D court / net pose defaults to the <strong>YOLO court keypoints</strong>{" "}
+          model from analysis. Draw lines below only to override. Court size
+          default is FIVB indoor{" "}
+          <strong>{DEFAULT_COURT.length_m}×{DEFAULT_COURT.width_m} m</strong>.
         </p>
+        {initial?.source === "auto_keypoints" ? (
+          <p className="meta-line" style={{ marginTop: "0.35rem" }}>
+            Active: <strong>auto keypoints</strong>
+            {initial.from_run_id ? (
+              <>
+                {" "}
+                from <code>runs/{initial.from_run_id}</code>
+              </>
+            ) : null}
+          </p>
+        ) : initial?.source === "manual" ? (
+          <p className="meta-line" style={{ marginTop: "0.35rem" }}>
+            Active: <strong>manual lines</strong>
+          </p>
+        ) : null}
       </div>
 
       <div className="row court-dims" style={{ flexWrap: "wrap", gap: "1rem" }}>
@@ -331,7 +373,15 @@ export function CalibrationEditor({
         </svg>
       </div>
 
-      <div className="row">
+      <div className="row" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
+        <button
+          type="button"
+          className="secondary"
+          disabled={applyingAuto}
+          onClick={() => void applyAutoKeypoints()}
+        >
+          {applyingAuto ? "Applying…" : "Use YOLO court keypoints"}
+        </button>
         <button
           type="button"
           className="secondary"
@@ -360,7 +410,7 @@ export function CalibrationEditor({
           disabled={saving || !canSave}
           onClick={() => void save()}
         >
-          {saving ? "Saving…" : "Save calibration"}
+          {saving ? "Saving…" : "Save manual override"}
         </button>
       </div>
       {error ? <div className="error">{error}</div> : null}

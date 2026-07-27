@@ -2,6 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { Job } from "@volleyballai/types";
+import {
+  formatRunDateTime,
+  formatRunDuration,
+  formatRunModels,
+  formatRunTiming,
+} from "@/lib/formatRun";
 
 export function JobPanel({
   videoId,
@@ -72,6 +78,7 @@ export function JobPanel({
   }
 
   const latest = jobs[0];
+  const prior = jobs.slice(1, 6);
 
   return (
     <div className="card stack">
@@ -107,11 +114,70 @@ export function JobPanel({
             />
           </div>
           {latest.error ? <div className="error">{latest.error}</div> : null}
+          {latest.run?.started_at ? (
+            <div className="stack" style={{ gap: "0.25rem" }}>
+              <p className="meta-line" style={{ margin: 0 }}>
+                Started{" "}
+                <strong>{formatRunDateTime(latest.run.started_at)}</strong>
+              </p>
+              <p className="meta-line" style={{ margin: 0 }}>
+                {latest.run.finished_at ? (
+                  <>
+                    Finished{" "}
+                    <strong>
+                      {formatRunDateTime(latest.run.finished_at)}
+                    </strong>
+                    {" · "}
+                    Duration{" "}
+                    <strong>
+                      {formatRunDuration(
+                        latest.run.started_at,
+                        latest.run.finished_at,
+                        latest.run.duration_s,
+                      )}
+                    </strong>
+                  </>
+                ) : (
+                  <>Finished — · in progress</>
+                )}
+              </p>
+              {latest.run.run_id ? (
+                <p className="meta-line" style={{ margin: 0 }}>
+                  Run folder <code>runs/{latest.run.run_id}</code>
+                </p>
+              ) : null}
+              <p className="meta-line" style={{ margin: 0 }}>
+                Models {formatRunModels(latest.run)}
+              </p>
+            </div>
+          ) : null}
           <p className="hint">
             Job <code>{latest.id}</code> · pipeline {latest.pipeline_version}
           </p>
         </div>
       )}
+
+      {prior.length > 0 ? (
+        <div className="stack" style={{ gap: "0.35rem" }}>
+          <p className="meta-line" style={{ margin: 0 }}>
+            Previous runs
+          </p>
+          {prior.map((job) => (
+            <p key={job.id} className="hint" style={{ margin: 0 }}>
+              <span className={`badge ${job.status}`}>{job.status}</span>{" "}
+              {job.run?.started_at
+                ? formatRunTiming(job.run)
+                : formatRunDateTime(job.created_at)}
+              {job.run?.run_id ? (
+                <>
+                  {" "}
+                  · <code>{job.run.run_id}</code>
+                </>
+              ) : null}
+            </p>
+          ))}
+        </div>
+      ) : null}
 
       {error ? <div className="error">{error}</div> : null}
 
@@ -123,15 +189,14 @@ export function JobPanel({
 
       {latest?.status === "needs_calibration" ? (
         <p className="hint">
-          Tracking finished. Click the four court corners below (near left → near
-          right → far right → far left) so players and ball map onto the 18×9m
-          court.
+          Tracks ready. Open the page to apply YOLO court keypoints for 3D, or
+          draw lines below to override manually.
         </p>
       ) : (
         <p className="hint">
-          Worker required (<code>npm run worker</code>). Pipeline: normalize →
-          Modal SAM 3.1 players → ball → 3D. Calibrate corners to place everyone
-          on the court.
+          Worker required (<code>npm run worker</code>). Each run saves under{" "}
+          <code>runs/&lt;date_time&gt;/</code>. Court keypoints auto-drive the
+          3D camera; manual lines override.
         </p>
       )}
     </div>

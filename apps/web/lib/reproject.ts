@@ -15,6 +15,7 @@ import type {
 } from "@volleyballai/types";
 import { DEFAULT_COURT, PIPELINE_VERSION } from "@volleyballai/types";
 import { videoDir } from "./paths";
+import { resolveArtifactDir } from "./store";
 
 export function ensureHomography(cal: Calibration): Calibration {
   const kf = cal.keyframes[0];
@@ -85,13 +86,14 @@ export async function reprojectArtifacts(
     );
   }
 
-  const dir = videoDir(videoId);
-  const tracksPath = path.join(dir, "players.tracks.json");
-  const ballPath = path.join(dir, "ball.tracks.json");
-  const court3dPath = path.join(dir, "court3d.json");
-  const calPath = path.join(dir, "calibration.json");
+  const root = videoDir(videoId);
+  const artifactDir = await resolveArtifactDir(videoId);
+  const tracksPath = path.join(artifactDir, "players.tracks.json");
+  const ballPath = path.join(artifactDir, "ball.tracks.json");
+  const court3dPath = path.join(artifactDir, "court3d.json");
+  const calPath = path.join(root, "calibration.json");
 
-  // Persist camera onto calibration
+  // Persist camera onto calibration (video-scoped)
   await fs.writeFile(calPath, JSON.stringify(withCam, null, 2) + "\n");
 
   let tracks: PlayersTracksFile | null = null;
@@ -120,7 +122,11 @@ export async function reprojectArtifacts(
     players,
     pipeline_version: PIPELINE_VERSION,
   };
-  await fs.writeFile(tracksPath, JSON.stringify(nextTracks, null, 2) + "\n");
+  const tracksJson = JSON.stringify(nextTracks, null, 2) + "\n";
+  await fs.writeFile(tracksPath, tracksJson);
+  if (artifactDir !== root) {
+    await fs.writeFile(path.join(root, "players.tracks.json"), tracksJson);
+  }
 
   let ball: BallTracksFile | null = null;
   try {
@@ -155,7 +161,11 @@ export async function reprojectArtifacts(
         };
       }),
     };
-    await fs.writeFile(ballPath, JSON.stringify(ball, null, 2) + "\n");
+    const ballJson = JSON.stringify(ball, null, 2) + "\n";
+    await fs.writeFile(ballPath, ballJson);
+    if (artifactDir !== root) {
+      await fs.writeFile(path.join(root, "ball.tracks.json"), ballJson);
+    }
   }
 
   const samples: {
@@ -201,8 +211,7 @@ export async function reprojectArtifacts(
     samples.push({ t, players: markers, ball: ballPos });
   }
 
-  await fs.writeFile(
-    court3dPath,
+  const court3dJson =
     JSON.stringify(
       {
         video_id: videoId,
@@ -213,6 +222,9 @@ export async function reprojectArtifacts(
       },
       null,
       2,
-    ) + "\n",
-  );
+    ) + "\n";
+  await fs.writeFile(court3dPath, court3dJson);
+  if (artifactDir !== root) {
+    await fs.writeFile(path.join(root, "court3d.json"), court3dJson);
+  }
 }

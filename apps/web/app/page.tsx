@@ -1,5 +1,10 @@
 import Link from "next/link";
 import { listVideos, listJobsForVideo } from "@/lib/store";
+import {
+  formatRunDateTime,
+  formatRunDuration,
+  formatRunTiming,
+} from "@/lib/formatRun";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +37,11 @@ export default async function LibraryPage() {
             videos.map(async (video) => {
               const jobs = await listJobsForVideo(video.id);
               const latest = jobs[0];
+              const run = latest?.run ?? null;
+              const clipDur =
+                video.meta.duration_s != null
+                  ? `${video.meta.duration_s.toFixed(1)}s clip`
+                  : null;
               return (
                 <Link
                   key={video.id}
@@ -50,13 +60,38 @@ export default async function LibraryPage() {
                   </div>
                   <div className="meta-line">
                     {video.original_filename ?? video.id}
-                    {video.meta.duration_s != null
-                      ? ` · ${video.meta.duration_s.toFixed(1)}s`
-                      : ""}
-                    {latest
-                      ? ` · ${latest.stage} ${(latest.progress * 100).toFixed(0)}%`
-                      : ""}
+                    {clipDur ? ` · ${clipDur}` : ""}
                   </div>
+                  <div className="meta-line">
+                    Uploaded {formatRunDateTime(video.created_at)}
+                  </div>
+                  {run?.started_at ? (
+                    <div className="meta-line">
+                      {run.finished_at ? (
+                        <>
+                          Analysis {formatRunDateTime(run.started_at)} →{" "}
+                          {formatRunDateTime(run.finished_at)} ·{" "}
+                          <strong>
+                            {formatRunDuration(
+                              run.started_at,
+                              run.finished_at,
+                              run.duration_s,
+                            )}
+                          </strong>
+                        </>
+                      ) : (
+                        formatRunTiming(run)
+                      )}
+                      {run.run_id ? (
+                        <span className="muted"> · {run.run_id}</span>
+                      ) : null}
+                    </div>
+                  ) : latest ? (
+                    <div className="meta-line">
+                      Stage <code>{latest.stage}</code>{" "}
+                      {(latest.progress * 100).toFixed(0)}%
+                    </div>
+                  ) : null}
                 </Link>
               );
             }),

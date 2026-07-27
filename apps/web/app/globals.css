@@ -136,6 +136,20 @@ main:has(.workspace) {
 .court3d-pane .court3d-canvas {
   flex: 1;
   min-height: 280px;
+  position: relative;
+  touch-action: none;
+  cursor: grab;
+}
+
+.court3d-pane .court3d-canvas:active {
+  cursor: grabbing;
+}
+
+.court3d-pane .court3d-canvas canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  touch-action: none;
 }
 
 main > .stack {

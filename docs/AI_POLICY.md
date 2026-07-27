@@ -12,7 +12,8 @@ All model **weights** and **inference** are hosted and executed on **Modal**.
 ## Includes (non-exhaustive)
 
 - Meta SAM 3.1 (player detect / segment / track)
-- Ball detectors
+- Ball detectors (VballNet / TrackNet-family ONNX)
+- Court keypoint pose models (YOLOv11-pose / volley-ref-ai)
 - Pose estimators
 - Action / event models
 - Fine-tunes, embeddings, re-ID nets

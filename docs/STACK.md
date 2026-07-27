@@ -10,7 +10,9 @@
 | **Analysis jobs** | **Google Cloud Run Jobs** | One execution per analysis; CPU pipeline |
 | Worker image | Docker (`worker/`) | Same image locally or on Cloud Run |
 | AI / GPU | Modal | **All** models; called from job container |
+| Court keypoints | YOLOv11n-pose (`volley-ref-ai`) | On Modal; 14 FIVB landmarks |
 | Player tracking | Meta SAM 3.1 | On Modal (Object Multiplex) |
+| Ball tracking | VballNetV1 (TrackNet-family ONNX) | On Modal |
 | 3D | React Three Fiber / Three.js | Known FIVB court mesh |
 | Video tools | ffmpeg, ffprobe | Inside Cloud Run Job container |
 | YouTube (later) | yt-dlp | Inside job container or Modal CPU, not day one |
@@ -19,7 +21,7 @@
 
 | Area | Direction |
 |---|---|
-| Ball | Hybrid detector — **on Modal** |
+| Auto-calibrate from keypoints | Seed `calibration.json` when conf high |
 | Actions | Rules + pose first → learned later — **on Modal** |
 | Score | Rally state machine + human edits |
 | Jersey / team ID | Later (OCR optional) |

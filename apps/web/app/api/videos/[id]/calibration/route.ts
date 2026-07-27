@@ -65,6 +65,9 @@ export async function PUT(
     keyframes,
     segments: body.segments,
     H: body.H ?? null,
+    // UI line drawing always wins over auto keypoints.
+    source: "manual",
+    from_run_id: null,
   };
 
   try {

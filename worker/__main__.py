@@ -71,19 +71,24 @@ def run_job(client: httpx.Client, job: dict) -> None:
         if not result.get("projected"):
             status = "needs_calibration"
 
-        patch_job(
-            client,
-            job_id,
-            status=status,
-            stage="done",
-            progress=1.0,
-            error=None,
-        )
+        patch_fields: dict = {
+            "status": status,
+            "stage": "done",
+            "progress": 1.0,
+            "error": None,
+        }
+        if isinstance(result.get("run"), dict):
+            patch_fields["run"] = result["run"]
+        patch_job(client, job_id, **patch_fields)
+        run = result.get("run") or {}
+        models = (run.get("models") or {}) if isinstance(run, dict) else {}
         print(
             f"[worker] finished job {job_id} status={status} "
-            f"mock={result.get('mock')} players={result.get('player_count')} "
+            f"started={run.get('started_at')} "
+            f"court={result.get('court_detections')} "
+            f"players={result.get('player_count')} "
             f"ball_frames={result.get('ball_frames')} "
-            f"src={result.get('player_source')}/{result.get('ball_source')}",
+            f"models={models.get('court')}/{models.get('players')}/{models.get('ball')}",
             flush=True,
         )
     except Exception as exc:  # noqa: BLE001
@@ -104,7 +109,7 @@ def main() -> int:
     print(f"[worker] polling {API_BASE} every {POLL_SECONDS}s", flush=True)
     print(
         f"[worker] USE_MOCK_TRACKS={'1' if mock else '0'} "
-        f"({'SYNTHETIC' if mock else 'Modal SAM 3.1 + ball'})",
+        f"({'SYNTHETIC' if mock else 'Modal court + SAM 3.1 + ball'})",
         flush=True,
     )
     if mock:
