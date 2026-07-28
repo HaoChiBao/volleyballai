@@ -11,7 +11,8 @@
     "lint": "npm run lint -w @volleyballai/web",
     "worker": ".venv/Scripts/python.exe -u -m worker",
     "modal:deploy": "modal deploy modal_app/app.py",
-    "modal:test-court": "modal run modal_app/app.py::test_court"
+    "modal:test-court": "modal run modal_app/app.py::test_court",
+    "modal:spatial": "modal run modal_app/app.py::build_spatial_scene_local"
   },
   "engines": {
     "node": ">=20"

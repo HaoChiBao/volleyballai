@@ -13,6 +13,7 @@ Hugging Face `Davidsv/volley-ref-ai` (yolo_court_keypoints.pt).
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,86 @@ _TENNIS_COURT_MODEL_PATH = "/models/tennis_court_detector.pth"
 _TENNIS_GDRIVE = "https://drive.google.com/uc?id=1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG"
 
 court_models_volume = modal.Volume.from_name("court-extra-models", create_if_missing=True)
+
+# High-quality video → Gaussian splat (Nerfstudio). Weights/train on Modal only.
+spatial_volume = modal.Volume.from_name("spatial-scenes", create_if_missing=True)
+_SPATIAL_MOUNT = "/spatial"
+
+# Official-ish all-in-one image: nerfstudio + COLMAP + gsplat (CUDA 11.8).
+spatial_image = (
+    modal.Image.from_registry("dromni/nerfstudio:1.1.5")
+    .entrypoint([])
+    .pip_install(
+        "opencv-python-headless==4.10.0.84",
+        "numpy",
+    )
+    .env(
+        {
+            "SPATIAL_MOUNT": _SPATIAL_MOUNT,
+            "NERFSTUDIO_METHOD": "splatfacto-big",
+        },
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "spatial_scene.py"),
+        remote_path="/root/spatial_scene.py",
+    )
+)
+
+# Full moonshotai/Kimi-K3 (~1.56 TB) — Volume only, never baked into the image / laptop.
+kimi_k3_volume = modal.Volume.from_name("kimi-k3-weights", create_if_missing=True)
+_KIMI_MOUNT = "/models/kimi-k3"
+_KIMI_REPO = "moonshotai/Kimi-K3"
+
+kimi_fetch_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("curl", "ca-certificates", "git")
+    .pip_install(
+        "huggingface_hub[hf_transfer]>=0.30.0",
+        "hf_transfer",
+    )
+    .env(
+        {
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "KIMI_K3_MOUNT": _KIMI_MOUNT,
+            "KIMI_K3_REPO": _KIMI_REPO,
+        },
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "kimi_k3.py"),
+        remote_path="/root/kimi_k3.py",
+    )
+)
+
+# Day-0 Kimi K3: vLLM documents that only the official Docker image is usable
+# (pre-release FlashInfer / KDA deps). See https://vllm.ai/blog/2026-07-27-k3
+kimi_serve_image = (
+    modal.Image.from_registry("vllm/vllm-openai:kimi-k3")
+    .entrypoint([])
+    .apt_install("libgl1", "libglib2.0-0")
+    .pip_install(
+        "httpx",
+        "numpy",
+        "opencv-python-headless==4.10.0.84",
+        "pillow",
+    )
+    .env(
+        {
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+            "VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION": "1",
+            "KIMI_K3_MOUNT": _KIMI_MOUNT,
+            "KIMI_K3_REPO": _KIMI_REPO,
+            "KIMI_VLLM_PORT": "8000",
+        },
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "kimi_k3.py"),
+        remote_path="/root/kimi_k3.py",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "court_normalize.py"),
+        remote_path="/root/court_normalize.py",
+    )
+)
 
 court_image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -856,17 +937,573 @@ def compare_court_models(
         return out
 
 
+@app.function(
+    image=kimi_fetch_image,
+    volumes={_KIMI_MOUNT: kimi_k3_volume},
+    secrets=[modal.Secret.from_name("huggingface")],
+    timeout=60 * 60 * 12,
+    cpu=8.0,
+    memory=65536,
+    # Staging only — full weights land on the Volume mount, not ephemeral disk.
+    ephemeral_disk=200_000,
+)
+def fetch_kimi_k3() -> dict:
+    """
+    Download full moonshotai/Kimi-K3 (~1.56 TB) onto Volume `kimi-k3-weights`.
+
+    Resume-safe. Commits the Volume every ~5 minutes during download.
+    """
+    import sys
+
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from kimi_k3 import (  # type: ignore
+        KIMI_MOUNT,
+        fetch_snapshot,
+        free_disk_gb,
+        volume_stats,
+    )
+
+    # Keep HF temp/cache off the Volume so we don't double ~1.56 TB.
+    os.environ.setdefault("HF_HOME", "/tmp/hf")
+    os.environ.setdefault("HF_HUB_CACHE", "/tmp/hf/hub")
+    Path("/tmp/hf/hub").mkdir(parents=True, exist_ok=True)
+
+    root = Path(KIMI_MOUNT)
+    print(f"[fetch_kimi_k3] free_disk_gb={free_disk_gb(root)} stats={volume_stats(root)}")
+
+    def _commit() -> None:
+        kimi_k3_volume.commit()
+
+    result = fetch_snapshot(root, commit_fn=_commit, commit_every_s=300.0)
+    _commit()
+    print(f"[fetch_kimi_k3] done ok={result.get('ok')} stats={result.get('stats')}")
+    return result
+
+
+@app.function(
+    image=kimi_fetch_image,
+    volumes={_KIMI_MOUNT: kimi_k3_volume},
+    timeout=60 * 10,
+    cpu=2.0,
+    memory=4096,
+)
+def kimi_k3_volume_status() -> dict:
+    """Report whether the Kimi-K3 Volume snapshot looks complete."""
+    import sys
+
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from kimi_k3 import KIMI_MOUNT, is_snapshot_complete, volume_stats  # type: ignore
+
+    root = Path(KIMI_MOUNT)
+    st = volume_stats(root)
+    return {
+        "complete": is_snapshot_complete(root),
+        "stats": st,
+        "repo_id": _KIMI_REPO,
+        "mount": _KIMI_MOUNT,
+    }
+
+
+@app.cls(
+    image=kimi_serve_image,
+    gpu="B300:8",
+    volumes={_KIMI_MOUNT: kimi_k3_volume},
+    secrets=[modal.Secret.from_name("huggingface")],
+    timeout=60 * 60 * 4,
+    startup_timeout=60 * 60,
+    scaledown_window=60 * 20,
+    memory=524288,  # 512 GiB host RAM for weight staging
+    cpu=32.0,
+    max_containers=1,
+    ephemeral_disk=100_000,
+)
+class KimiK3Server:
+    """
+    Full Kimi-K3 via vLLM on 8×B300 (tensor-parallel-size 8).
+
+    Serves OpenAI-compatible HTTP on localhost:8000 inside the container.
+    """
+
+    @modal.enter()
+    def start(self) -> None:
+        import subprocess
+        import sys
+        import time
+
+        import httpx
+
+        if "/root" not in sys.path:
+            sys.path.insert(0, "/root")
+        from kimi_k3 import KIMI_MOUNT, is_snapshot_complete, volume_stats  # type: ignore
+
+        root = Path(KIMI_MOUNT)
+        st = volume_stats(root)
+        print(f"[KimiK3Server] volume stats={st}", flush=True)
+        if not is_snapshot_complete(root):
+            raise RuntimeError(
+                "Kimi-K3 snapshot incomplete on Volume. "
+                "Run: modal run modal_app/app.py::fetch_kimi_k3_local",
+            )
+
+        port = int(os.environ.get("KIMI_VLLM_PORT", "8000"))
+        # Prefer weights at mount root (config.json present).
+        model_path = str(root)
+        # Prefer `vllm` CLI from the official kimi-k3 image; fall back to -m.
+        vllm_bin = "vllm"
+        cmd = [
+            vllm_bin,
+            "serve",
+            model_path,
+            "--served-model-name",
+            "kimi-k3",
+            "--tensor-parallel-size",
+            "8",
+            "--trust-remote-code",
+            "--load-format",
+            "fastsafetensors",
+            "--enable-prefix-caching",
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "kimi_k3",
+            "--reasoning-parser",
+            "kimi_k3",
+            "--max-model-len",
+            os.environ.get("KIMI_MAX_MODEL_LEN", "32768"),
+            "--gpu-memory-utilization",
+            os.environ.get("KIMI_GPU_MEM_UTIL", "0.90"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ]
+        print(f"[KimiK3Server] starting: {' '.join(cmd)}", flush=True)
+        self._port = port
+        self._base_url = f"http://127.0.0.1:{port}/v1"
+        self._proc = subprocess.Popen(
+            cmd,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+
+        # Cold load of ~1.56 TB can take many minutes.
+        deadline = time.time() + 60 * 45
+        last_err = ""
+        while time.time() < deadline:
+            if self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"vLLM exited early with code {self._proc.returncode}",
+                )
+            try:
+                r = httpx.get(f"{self._base_url}/models", timeout=5.0)
+                if r.status_code == 200:
+                    print(f"[KimiK3Server] ready: {r.text[:300]}", flush=True)
+                    return
+                last_err = f"status={r.status_code}"
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+            time.sleep(5)
+        raise TimeoutError(f"vLLM did not become ready in time ({last_err})")
+
+    @modal.exit()
+    def stop(self) -> None:
+        proc = getattr(self, "_proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=60)
+            except Exception:  # noqa: BLE001
+                proc.kill()
+
+    @modal.method()
+    def health(self) -> dict:
+        import httpx
+
+        r = httpx.get(f"{self._base_url}/models", timeout=30.0)
+        return {"ok": r.status_code == 200, "body": r.json() if r.status_code == 200 else r.text}
+
+    @modal.method()
+    def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Proxy to local vLLM OpenAI chat.completions."""
+        import httpx
+
+        body = dict(payload)
+        body.setdefault("model", "kimi-k3")
+        r = httpx.post(
+            f"{self._base_url}/chat/completions",
+            json=body,
+            timeout=60 * 20,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"vLLM chat error {r.status_code}: {r.text[:2000]}")
+        return r.json()
+
+    @modal.method()
+    def analyze_court(
+        self,
+        image_bytes: bytes,
+        *,
+        video_id: str = "",
+        pipeline_version: str = PIPELINE_VERSION,
+        media_suffix: str = ".jpg",
+        temperature: float = 0.1,
+        max_tokens: int = 2048,
+        return_overlay: bool = True,
+    ) -> dict[str, Any]:
+        """Vision → volleyball_court_v1 keypoints using full self-hosted Kimi-K3."""
+        import sys
+
+        import cv2
+        import numpy as np
+
+        if "/root" not in sys.path:
+            sys.path.insert(0, "/root")
+        from court_normalize import (  # type: ignore
+            COURT_POINTS_M,
+            KEYPOINT_NAMES,
+            SKELETON,
+            draw_court_overlay,
+            encode_jpg_b64,
+            bbox_from_keypoints,
+        )
+        from kimi_k3 import (  # type: ignore
+            court_keypoint_system_prompt,
+            court_keypoint_user_text,
+            encode_image_data_url,
+            mime_for_suffix,
+            parse_keypoints_json,
+        )
+
+        if not image_bytes:
+            raise ValueError("Empty image_bytes")
+
+        arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError("Failed to decode image")
+        h, w = frame.shape[:2]
+        mime = mime_for_suffix(media_suffix)
+        data_url = encode_image_data_url(image_bytes, mime=mime)
+
+        payload = {
+            "model": "kimi-k3",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": court_keypoint_system_prompt()},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": court_keypoint_user_text(w, h)},
+                    ],
+                },
+            ],
+        }
+        print(f"[KimiK3Server.analyze_court] {w}x{h} bytes={len(image_bytes)}", flush=True)
+        import httpx
+
+        r = httpx.post(
+            f"{self._base_url}/chat/completions",
+            json=payload,
+            timeout=60 * 20,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"vLLM chat error {r.status_code}: {r.text[:2000]}")
+        completion = r.json()
+        text = (
+            ((completion.get("choices") or [{}])[0].get("message") or {}).get("content")
+            or ""
+        )
+        keypoints = parse_keypoints_json(text, width=w, height=h)
+        # Attach court meters for schema compatibility with YOLO path.
+        for i, kp in enumerate(keypoints):
+            if i < len(COURT_POINTS_M):
+                kp["court_m"] = COURT_POINTS_M[i]
+
+        visible = sum(1 for k in keypoints if k.get("visible"))
+        bbox = bbox_from_keypoints(keypoints)
+        overlays: list[dict[str, Any]] = []
+        frames_out: list[dict[str, Any]] = []
+        if visible > 0:
+            frames_out.append(
+                {
+                    "t": 0.0,
+                    "frame_index": 0,
+                    "bbox": bbox,
+                    "box_conf": round(
+                        float(
+                            np.mean([k["conf"] for k in keypoints if k.get("visible")])
+                            if visible
+                            else 0.0,
+                        ),
+                        3,
+                    ),
+                    "keypoints": keypoints,
+                    "raw_text": text[:8000],
+                },
+            )
+            if return_overlay:
+                ov = draw_court_overlay(
+                    frame,
+                    keypoints,
+                    bbox=bbox,
+                    title=f"kimi-k3 ({visible}/14)",
+                )
+                overlays.append(
+                    {"t": 0.0, "frame_index": 0, "jpg_b64": encode_jpg_b64(ov)},
+                )
+
+        return {
+            "video_id": video_id,
+            "pipeline_version": pipeline_version,
+            "schema": "volleyball_court_v1",
+            "source": "kimi_k3",
+            "model": "moonshotai/Kimi-K3",
+            "model_repo": _KIMI_REPO,
+            "keypoint_names": list(KEYPOINT_NAMES),
+            "skeleton": [list(e) for e in SKELETON],
+            "court_points_m": COURT_POINTS_M,
+            "image_size": {"width": w, "height": h},
+            "frames": frames_out,
+            "overlays": overlays,
+            "detections": len(frames_out),
+            "visible_keypoints": visible,
+            "raw_completion": text[:8000],
+            "note": "Full self-hosted Kimi-K3 on Modal Volume + vLLM B300:8",
+        }
+
+
+@app.function(timeout=60 * 90)
+def analyze_court_with_kimi_k3(
+    image_bytes: bytes,
+    video_id: str = "",
+    pipeline_version: str = PIPELINE_VERSION,
+    media_suffix: str = ".jpg",
+    return_overlay: bool = True,
+) -> dict:
+    """
+    Convenience wrapper: spawn KimiK3Server and run court keypoint analysis.
+
+    Requires a completed `fetch_kimi_k3` Volume snapshot.
+    """
+    return KimiK3Server().analyze_court.remote(
+        image_bytes,
+        video_id=video_id,
+        pipeline_version=pipeline_version,
+        media_suffix=media_suffix,
+        return_overlay=return_overlay,
+    )
+
+
+@app.function(
+    image=spatial_image,
+    gpu="A100-80GB",
+    volumes={_SPATIAL_MOUNT: spatial_volume},
+    timeout=60 * 60 * 3,
+    memory=65536,
+    cpu=8.0,
+    ephemeral_disk=200_000,
+)
+def build_spatial_scene(
+    video_bytes: bytes,
+    video_id: str = "scene",
+    *,
+    method: str = "splatfacto-big",
+    max_iters: int = 30_000,
+    num_frames_target: int = 280,
+    appearance_embedding: bool = True,
+    burn_transients: bool = True,
+    players_tracks_json: str | None = None,
+) -> dict:
+    """
+    Best-quality static environment splat from video (Nerfstudio splatfacto-big).
+
+    Writes `/spatial/{video_id}/export/scene.ply` on Volume `spatial-scenes`.
+    Optionally burns player bboxes from players.tracks.json to reduce ghosts.
+    """
+    import sys
+    import tempfile
+
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from spatial_scene import SPATIAL_MOUNT, build_gaussian_scene  # type: ignore
+
+    if not video_bytes:
+        raise ValueError("Empty video_bytes")
+
+    tracks_payload = None
+    if players_tracks_json:
+        import json as _json
+
+        tracks_payload = _json.loads(players_tracks_json)
+
+    out_root = Path(SPATIAL_MOUNT) / (video_id or "scene")
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="spatial_in_") as td:
+        video_path = Path(td) / "input.mp4"
+        video_path.write_bytes(video_bytes)
+        meta = build_gaussian_scene(
+            video_path,
+            out_root,
+            method=method,
+            max_iters=max_iters,
+            num_frames_target=num_frames_target,
+            appearance_embedding=appearance_embedding,
+            tracks_payload=tracks_payload,
+            burn_transients=burn_transients,
+        )
+
+    # Persist under a stable volume-relative path for download.
+    ply_src = Path(meta["ply"])
+    stable_dir = Path(SPATIAL_MOUNT) / (video_id or "scene") / "publish"
+    stable_dir.mkdir(parents=True, exist_ok=True)
+    stable_ply = stable_dir / "scene.ply"
+    stable_meta = stable_dir / "meta.json"
+    if ply_src.exists():
+        shutil.copy2(ply_src, stable_ply)
+    import json as _json
+
+    pub = {
+        **meta,
+        "video_id": video_id,
+        "pipeline_version": PIPELINE_VERSION,
+        "volume": "spatial-scenes",
+        "volume_ply": str(stable_ply),
+        "volume_meta": str(stable_meta),
+    }
+    stable_meta.write_text(_json.dumps(pub, indent=2), encoding="utf-8")
+    spatial_volume.commit()
+    print(f"[build_spatial_scene] published {stable_ply} bytes={stable_ply.stat().st_size}")
+    return pub
+
+
+@app.function(
+    image=spatial_image,
+    volumes={_SPATIAL_MOUNT: spatial_volume},
+    timeout=60 * 20,
+    memory=8192,
+    cpu=2.0,
+)
+def download_spatial_scene_ply(video_id: str) -> dict:
+    """Return scene.ply bytes + meta from Volume (for local artifact write)."""
+    import base64
+    import json as _json
+
+    pub = Path(_SPATIAL_MOUNT) / video_id / "publish"
+    ply = pub / "scene.ply"
+    meta_path = pub / "meta.json"
+    if not ply.exists():
+        raise FileNotFoundError(
+            f"No published splat for video_id={video_id}. "
+            "Run build_spatial_scene first.",
+        )
+    raw = ply.read_bytes()
+    meta = {}
+    if meta_path.exists():
+        meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    return {
+        "video_id": video_id,
+        "ply_b64": base64.b64encode(raw).decode("ascii"),
+        "ply_bytes": len(raw),
+        "meta": meta,
+    }
+
+
 @app.local_entrypoint()
 def main(video_path: str = "", prompt: str = DEFAULT_PROMPT):
     if not video_path:
         print(
             "Deployed volleyball-ai: track_players + track_ball (+fast) + "
-            "detect_court + compare_court_models",
+            "detect_court + compare_court_models + fetch_kimi_k3 + KimiK3Server + "
+            "build_spatial_scene",
         )
         return
     data = Path(video_path).read_bytes()
     out = track_players.remote(video_bytes=data, video_id="local", prompt=prompt)
     print(f"players={len(out.get('players', []))} source={out.get('source')}")
+
+
+@app.local_entrypoint()
+def build_spatial_scene_local(
+    video_path: str = "",
+    video_id: str = "local-spatial",
+    tracks_path: str = "",
+    max_iters: int = 30_000,
+):
+    """
+    Best-quality env splat on Modal (splatfacto-big / A100-80GB).
+
+    Example:
+      modal run modal_app/app.py::build_spatial_scene_local \\
+        --video-path .data/videos/<id>/work.mp4 \\
+        --video-id <id> \\
+        --tracks-path .data/videos/<id>/players.tracks.json
+    """
+    if not video_path:
+        raise SystemExit("Pass --video-path path/to/work.mp4")
+    media = Path(video_path)
+    if not media.exists():
+        raise SystemExit(f"Not found: {media}")
+    tracks_json = None
+    if tracks_path:
+        tp = Path(tracks_path)
+        if tp.exists():
+            tracks_json = tp.read_text(encoding="utf-8")
+    print(
+        f"[build_spatial_scene_local] {media} → Modal splatfacto-big "
+        f"(iters={max_iters})…",
+    )
+    meta = build_spatial_scene.remote(
+        media.read_bytes(),
+        video_id=video_id,
+        max_iters=max_iters,
+        players_tracks_json=tracks_json,
+    )
+    print(meta)
+
+
+@app.local_entrypoint()
+def fetch_kimi_k3_local():
+    """Download full moonshotai/Kimi-K3 onto Modal Volume kimi-k3-weights."""
+    print("[fetch_kimi_k3_local] starting (this can take many hours / ~1.56 TB)…")
+    result = fetch_kimi_k3.remote()
+    print(result)
+
+
+@app.local_entrypoint()
+def kimi_k3_status_local():
+    """Print Volume completeness for Kimi-K3."""
+    print(kimi_k3_volume_status.remote())
+
+
+@app.local_entrypoint()
+def test_kimi_court(image_path: str = ""):
+    """
+    Run full self-hosted Kimi-K3 court keypoint analysis on one image.
+
+    Requires fetch_kimi_k3 completed and B300:8 capacity.
+    """
+    if not image_path:
+        raise SystemExit("Pass --image-path path/to/court.jpg")
+    media = Path(image_path)
+    if not media.exists():
+        raise SystemExit(f"Not found: {media}")
+    data = media.read_bytes()
+    print(f"[test_kimi_court] {media} ({len(data)} bytes) → KimiK3Server…")
+    out = analyze_court_with_kimi_k3.remote(
+        data,
+        video_id=media.stem,
+        media_suffix=media.suffix or ".jpg",
+        return_overlay=True,
+    )
+    print(
+        f"[test_kimi_court] visible={out.get('visible_keypoints')}/14 "
+        f"source={out.get('source')} model={out.get('model')}",
+    )
+    print((out.get("raw_completion") or "")[:500])
 
 
 @app.local_entrypoint()

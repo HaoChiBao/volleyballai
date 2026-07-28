@@ -12,7 +12,11 @@ const nextConfig: NextConfig = {
     // Flat ESLint + next/core-web-vitals currently warns during build; keep typecheck.
     ignoreDuringBuilds: true,
   },
-  transpilePackages: ["@volleyballai/types", "@volleyballai/court-math"],
+  transpilePackages: [
+    "@volleyballai/types",
+    "@volleyballai/court-math",
+    "@mkkellogg/gaussian-splats-3d",
+  ],
   outputFileTracingRoot: path.join(__dirname, "../.."),
 };
 

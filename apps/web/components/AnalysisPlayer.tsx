@@ -9,6 +9,8 @@ import type {
   BallFrame,
   BallTracksFile,
   Calibration,
+  CameraMotionFile,
+  NetTracksFile,
   PlayersTracksFile,
   Point2,
   TrackFrame,
@@ -18,6 +20,7 @@ import {
   formatRunDuration,
   formatRunModels,
 } from "@/lib/formatRun";
+import { netFrameAtTime } from "@/lib/netTracks";
 import {
   bracketFrames,
   lerp,
@@ -182,6 +185,8 @@ export function AnalysisPlayer({
   tracks,
   ball,
   court3d,
+  cameraMotion,
+  netTracks,
   onTime,
   compact,
 }: {
@@ -191,6 +196,10 @@ export function AnalysisPlayer({
   tracks: PlayersTracksFile | null;
   ball: BallTracksFile | null;
   court3d: Court3dFile | null;
+  /** Optional camera-motion ticks on the scrubber (test / pipeline artifact). */
+  cameraMotion?: CameraMotionFile | null;
+  /** Settle → net corners (+ optional ground projection overlay). */
+  netTracks?: NetTracksFile | null;
   onTime?: (t: number) => void;
   /** Side-by-side pane: fill height, tighter video */
   compact?: boolean;
@@ -205,8 +214,10 @@ export function AnalysisPlayer({
   const [size, setSize] = useState({ w: 1280, h: 720 });
   const [showOutlines, setShowOutlines] = useState(true);
   const [showBoxes, setShowBoxes] = useState(false);
-  const [showCourt3dOverlay, setShowCourt3dOverlay] = useState(true);
+  const [showCourt3dOverlay, setShowCourt3dOverlay] = useState(false);
   const [showBall, setShowBall] = useState(true);
+  const [showMotionTicks, setShowMotionTicks] = useState(true);
+  const [showNet, setShowNet] = useState(true);
 
   /** Push clock to React state + parent without a t→useEffect cascade (that trips React's max-update-depth guard when overlays are expensive). */
   const publishTime = useCallback((next: number) => {
@@ -214,7 +225,13 @@ export function AnalysisPlayer({
     onTimeRef.current?.(next);
   }, []);
 
+  const activeNetFrame = useMemo(
+    () => netFrameAtTime(netTracks, t),
+    [netTracks, t],
+  );
+
   const Hinv = useMemo(() => {
+    // Court overlay uses calibration H only — net-settle does not drive court drawing.
     if (!calibration?.H || calibration.H.length !== 9) return null;
     try {
       return invertHomography(calibration.H);
@@ -243,6 +260,46 @@ export function AnalysisPlayer({
       Math.abs(a.t - t) < Math.abs(b.t - t) ? a : b,
     );
   }, [court3d, t]);
+
+  const motionSpan = Math.max(
+    duration || 0,
+    cameraMotion?.duration_s || 0,
+    1e-6,
+  );
+  const motionSegments = cameraMotion?.segments ?? [];
+  const settlePoints = useMemo(() => {
+    if (cameraMotion?.settle_points?.length) {
+      return cameraMotion.settle_points;
+    }
+    // Back-compat: derive from motion_end events
+    return (cameraMotion?.events ?? [])
+      .filter((e) => e.type === "motion_end")
+      .map((e) => ({
+        t: e.t,
+        frame_index: e.frame_index,
+        kind: "motion_settled" as const,
+        use_for_net_detect: true,
+      }));
+  }, [cameraMotion]);
+  const mergeGapS = cameraMotion?.thresholds?.merge_gap_s;
+  const startsUnsettled = Boolean(cameraMotion?.settle_policy?.starts_unsettled);
+  const prefixSettleT = cameraMotion?.settle_policy?.prefix_use_settle_t ?? null;
+  const inMotion = useMemo(() => {
+    return motionSegments.some((s) => t >= s.start_t && t <= s.end_t);
+  }, [motionSegments, t]);
+  const activeSettle = useMemo(() => {
+    if (!settlePoints.length) return null;
+    // Unsettled opening: hold the first settle pose until that settle time.
+    if (startsUnsettled && prefixSettleT != null && t < prefixSettleT) {
+      return settlePoints[0] ?? null;
+    }
+    let best: (typeof settlePoints)[number] | null = null;
+    for (const sp of settlePoints) {
+      if (sp.t <= t + 1e-6) best = sp;
+      else break;
+    }
+    return best;
+  }, [settlePoints, t, startsUnsettled, prefixSettleT]);
 
   // Sync overlays to the video clock every animation frame while playing
   // (timeupdate alone is ~4–10Hz and makes tracks look lagged).
@@ -365,30 +422,58 @@ export function AnalysisPlayer({
         >
           Ball {showBall ? "on" : "off"}
         </button>
+        {cameraMotion ? (
+          <button
+            type="button"
+            className={`toggle-chip${showMotionTicks ? " active" : ""}`}
+            onClick={() => setShowMotionTicks((v) => !v)}
+            title={`${settlePoints.length} settle points · merge_gap=${mergeGapS ?? "—"}s · ${cameraMotion.method}`}
+          >
+            Cam settle {showMotionTicks ? "on" : "off"}
+            {inMotion ? " · moving" : ""}
+          </button>
+        ) : null}
+        {netTracks?.frames?.length ? (
+          <button
+            type="button"
+            className={`toggle-chip${showNet ? " active" : ""}`}
+            onClick={() => setShowNet((v) => !v)}
+            title={`Net tracks @ ${netTracks.frames.length} samples`}
+          >
+            Net {showNet ? "on" : "off"}
+          </button>
+        ) : null}
       </div>
 
       <div className="video-shell analysis-shell">
-        <video
-          ref={videoRef}
-          src={mediaUrl}
-          poster={posterUrl}
-          playsInline
-          onClick={togglePlay}
-          onLoadedMetadata={(e) => {
-            const el = e.currentTarget;
-            setSize({
-              w: el.videoWidth || 1280,
-              h: el.videoHeight || 720,
-            });
-            setDuration(el.duration || 0);
-          }}
-        />
-
-        <svg
-          className="analysis-overlay"
-          viewBox={`0 0 ${size.w} ${size.h}`}
-          preserveAspectRatio="xMidYMid meet"
+        <div
+          className="analysis-video-box"
+          style={
+            size.w > 0 && size.h > 0
+              ? { aspectRatio: `${size.w} / ${size.h}` }
+              : undefined
+          }
         >
+          <video
+            ref={videoRef}
+            src={mediaUrl}
+            poster={posterUrl}
+            playsInline
+            onClick={togglePlay}
+            onLoadedMetadata={(e) => {
+              const el = e.currentTarget;
+              setSize({
+                w: el.videoWidth || 1280,
+                h: el.videoHeight || 720,
+              });
+              setDuration(el.duration || 0);
+            }}
+          />
+          <svg
+            className="analysis-overlay"
+            viewBox={`0 0 ${size.w} ${size.h}`}
+            preserveAspectRatio="none"
+          >
           {showCourt3dOverlay && lines.length > 0 ? (
             <g className="court-overlay">
               <polygon
@@ -439,6 +524,40 @@ export function AnalysisPlayer({
                     );
                   })()
                 : null}
+            </g>
+          ) : null}
+
+          {showNet && activeNetFrame?.net ? (
+            <g className="net-overlay">
+              <polygon
+                points={[
+                  activeNetFrame.net.top_left,
+                  activeNetFrame.net.top_right,
+                  activeNetFrame.net.bottom_right,
+                  activeNetFrame.net.bottom_left,
+                ]
+                  .map((p) => `${p.x},${p.y}`)
+                  .join(" ")}
+                fill="rgba(0, 200, 255, 0.18)"
+                stroke="#00c8ff"
+                strokeWidth={Math.max(2.5, size.w / 420)}
+              />
+              {(
+                [
+                  activeNetFrame.net.top_left,
+                  activeNetFrame.net.top_right,
+                  activeNetFrame.net.bottom_right,
+                  activeNetFrame.net.bottom_left,
+                ] as Point2[]
+              ).map((p, i) => (
+                <circle
+                  key={`net-c-${i}`}
+                  cx={p.x}
+                  cy={p.y}
+                  r={Math.max(4, size.w / 200)}
+                  fill="#00c8ff"
+                />
+              ))}
             </g>
           ) : null}
 
@@ -500,6 +619,7 @@ export function AnalysisPlayer({
             />
           ) : null}
         </svg>
+        </div>
       </div>
 
       <div className="player-controls">
@@ -523,6 +643,16 @@ export function AnalysisPlayer({
           </button>
           <span className="meta-line time-readout">
             {formatTime(t)} / {formatTime(duration)}
+            {inMotion && showMotionTicks ? (
+              <span className="motion-live-badge"> cam moving</span>
+            ) : null}
+            {!inMotion &&
+            showMotionTicks &&
+            startsUnsettled &&
+            prefixSettleT != null &&
+            t < prefixSettleT ? (
+              <span className="motion-live-badge"> using next settle</span>
+            ) : null}
           </span>
           <label className="rate-label meta-line">
             Speed
@@ -538,20 +668,91 @@ export function AnalysisPlayer({
             </select>
           </label>
         </div>
-        <input
-          className="scrubber"
-          type="range"
-          min={0}
-          max={duration || 0}
-          step={0.01}
-          value={Math.min(t, duration || 0)}
-          onChange={(e) => seek(Number(e.target.value))}
-        />
+        <div className="scrubber-wrap">
+          {showMotionTicks && cameraMotion ? (
+            <div className="scrubber-motion" aria-hidden>
+              {startsUnsettled &&
+              prefixSettleT != null &&
+              prefixSettleT > 0 ? (
+                <span
+                  className="scrubber-motion-band scrubber-unsettled-prefix"
+                  style={{
+                    left: "0%",
+                    width: `${(prefixSettleT / motionSpan) * 100}%`,
+                  }}
+                  title={`Unsettled prefix — use settle @ ${prefixSettleT.toFixed(1)}s`}
+                />
+              ) : null}
+              {motionSegments.map((seg, i) => {
+                const left = (seg.start_t / motionSpan) * 100;
+                const width = Math.max(
+                  0.15,
+                  ((seg.end_t - seg.start_t) / motionSpan) * 100,
+                );
+                return (
+                  <span
+                    key={`seg-${i}`}
+                    className="scrubber-motion-band"
+                    style={{ left: `${left}%`, width: `${width}%` }}
+                    title={`Moving ${seg.start_t.toFixed(1)}s–${seg.end_t.toFixed(1)}s`}
+                  />
+                );
+              })}
+              {settlePoints.map((sp, i) => {
+                const left = (sp.t / motionSpan) * 100;
+                const isActive =
+                  activeSettle != null &&
+                  Math.abs((activeSettle.t ?? -1) - sp.t) < 1e-3;
+                return (
+                  <button
+                    key={`settle-${sp.t}-${i}`}
+                    type="button"
+                    className={`scrubber-motion-tick tick-settle${isActive ? " active" : ""}`}
+                    style={{ left: `${left}%` }}
+                    title={`Camera settled @ ${sp.t.toFixed(1)}s — set pose / net redetect`}
+                    onClick={() => seek(sp.t)}
+                  />
+                );
+              })}
+            </div>
+          ) : null}
+          <input
+            className="scrubber"
+            type="range"
+            min={0}
+            max={duration || 0}
+            step={0.01}
+            value={Math.min(t, duration || 0)}
+            onChange={(e) => seek(Number(e.target.value))}
+          />
+        </div>
+        {showMotionTicks && cameraMotion ? (
+          <div className="motion-legend meta-line">
+            <span className="motion-legend-swatch band" /> Moving
+            {startsUnsettled ? (
+              <>
+                <span className="motion-legend-swatch prefix" /> Unsettled→next
+              </>
+            ) : null}
+            <span className="motion-legend-swatch end" /> Settle / set
+            <span>
+              {settlePoints.length} settles ·{" "}
+              {cameraMotion.summary?.num_segments ?? motionSegments.length} segs
+              {mergeGapS != null ? ` · merge ≤${mergeGapS}s` : ""} ·{" "}
+              {cameraMotion.method}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       <p className="hint">
-        Body outlines come from SAM masks. Court overlay and 3D positions require
-        calibration (four corners → 18×9m FIVB court).
+        Body outlines come from SAM masks.
+        {cameraMotion
+          ? " Settle ticks mark when the camera stops (net/pose refresh)."
+          : ""}
+        {netTracks?.frames?.length
+          ? " Net overlay shows detected net corners only (no court fill yet)."
+          : " Court overlay requires calibration."}
       </p>
     </div>
   );

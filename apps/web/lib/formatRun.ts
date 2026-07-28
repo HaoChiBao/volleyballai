@@ -5,13 +5,16 @@ export function formatRunDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
+  // Fixed locale so SSR (Node) and the browser emit identical strings
+  // (e.g. "AM" vs "a.m." hydration mismatches with locale `undefined`).
+  return d.toLocaleString("en-US", {
     year: "numeric",
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
     second: "2-digit",
+    hour12: true,
   });
 }
 

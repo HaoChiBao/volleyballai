@@ -38,6 +38,81 @@ Functions:
 - `detect_court` — YOLOv11n-pose **14 court keypoints** ([Davidsv/volley-ref-ai](https://huggingface.co/Davidsv/volley-ref-ai))
 - `compare_court_models` — side-by-side **volley-ref + Kaggle YOLOv8x + TennisCourtDetector** (normalized `volleyball_court_v1` schema)
 - `fetch_court_models` — download Kaggle + tennis weights onto Modal Volume `court-extra-models`
+- `fetch_kimi_k3` — download full [`moonshotai/Kimi-K3`](https://huggingface.co/moonshotai/Kimi-K3) (~1.56 TB) onto Volume `kimi-k3-weights` (resume-safe)
+- `KimiK3Server` — vLLM serve of that Volume checkpoint on **8×B300** (`tensor-parallel-size 8`)
+- `analyze_court_with_kimi_k3` — multimodal court → `volleyball_court_v1` keypoints via **self-hosted** K3 (not API proxy, not Kimi-VL-A3B)
+- `build_spatial_scene` — Nerfstudio **splatfacto-big** Gaussian env splat on A100-80GB
+- `download_spatial_scene_ply` — pull published `.ply` from Volume `spatial-scenes`
+
+### Spatial scene (best-quality Gaussian splat env)
+
+Hybrid “live spatial video”: **static gym** from open-source Nerfstudio **splatfacto-big** on Modal, plus your existing **live player/ball tracks** in the web 3D view.
+
+| Item | Value |
+|---|---|
+| Method | `splatfacto-big` (higher quality / ~12GB+ VRAM) |
+| GPU | `A100-80GB` |
+| Volume | `spatial-scenes` → `/spatial/{video_id}/publish/scene.ply` |
+| Transient handling | Optional burn of SAM player bboxes before train |
+| Local artifacts | `.data/videos/<id>/spatial/scene.ply` + `meta.json` |
+
+**Policy:** Nerfstudio/COLMAP/train run on Modal only — not on the laptop.
+
+```powershell
+$env:PYTHONUTF8='1'
+npm run modal:deploy
+
+# Best-quality rebuild (often 30–90+ min). Prefer a 20–40s clip with camera motion.
+.\.venv\Scripts\python.exe -m worker.test_spatial_scene .data/videos/<id>/work.mp4 --video-id <id>
+
+# or:
+modal run modal_app/app.py::build_spatial_scene_local `
+  --video-path .data/videos/<id>/work.mp4 `
+  --video-id <id> `
+  --tracks-path .data/videos/<id>/players.tracks.json
+```
+
+Open the video page → Synced view: toggle **Splat on** / **Court on**. Orbit the reconstructed environment; players and ball still follow the playhead from tracks.
+
+Capture tips: continuous shot, physical camera movement / parallax, minimal cuts. Fixed broadcast cams may fail COLMAP — try a slow sideline pan or empty-court walkthrough.
+
+Cost ballpark: A100-80GB for ~1h train ≈ tens of dollars per clip (not Kimi-K3 B300 territory). Volume storage for `.ply` is usually small (tens–hundreds of MB).
+
+### Full Kimi K3 (self-hosted on Modal)
+
+**Policy:** weights stay on Modal only — never snapshot to the laptop.
+
+Modal also offers a managed Shared API for K3; this project path **self-hosts the HF checkpoint on our Volume** so experiments use our exact copy.
+
+| Resource | Value |
+|---|---|
+| HF repo | `moonshotai/Kimi-K3` (~1.56 TB, 118 files, not gated) |
+| Volume | `kimi-k3-weights` → mounted at `/models/kimi-k3` |
+| Serve GPU | `B300:8` (vLLM day-0 recipe); cold load can take many minutes |
+| Secret | `huggingface` (`HF_TOKEN`) — same as SAM |
+| Cost | Volume storage (~1.56 TB) + B300:8 runtime while the class is warm |
+
+```powershell
+$env:PYTHONUTF8='1'
+npm run modal:deploy
+
+# 1) Fetch (many hours; resume-safe — re-run if interrupted)
+modal run modal_app/app.py::fetch_kimi_k3_local
+modal run modal_app/app.py::kimi_k3_status_local
+
+# 2) Court keypoint experiment (spins KimiK3Server / B300:8)
+.\.venv\Scripts\python.exe -m worker.test_kimi_court .data/videos/<id>/thumb.jpg
+# writes .data/kimi-k3-court-test/kimi_k3.court.keypoints.json + overlay_*.jpg
+
+# or via Modal local entrypoint:
+modal run modal_app/app.py::test_kimi_court --image-path .data/videos/<id>/thumb.jpg
+```
+
+Serve image: official `vllm/vllm-openai:kimi-k3` (day-0 KDA/MXFP4 deps; pip-only installs are not usable yet).
+
+vLLM flags (inside `KimiK3Server`): `--tensor-parallel-size 8 --trust-remote-code --load-format fastsafetensors --enable-prefix-caching --max-model-len 32768` (+ Kimi tool/reasoning parsers).
+
+Keep the class warm during experiments (`scaledown_window` 20 min) — reloading 1.56 TB is expensive.
 
 ### Test court keypoints
 

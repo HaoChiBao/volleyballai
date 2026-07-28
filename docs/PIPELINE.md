@@ -16,6 +16,7 @@ Stages run in order. Each writes artifacts + progress. Stages should be independ
 | 7 | `actions` | Job calls **Modal** (+ rules) | tracks | `events.json` |
 | 8 | `score` | Heuristics + UI edit | events | rallies / sets |
 | 9 | `project_3d` | Job CPU math (preferred) | calibration + tracks | `court3d.json` |
+| 9b | `spatial_scene` (optional) | Modal Nerfstudio `splatfacto-big` | `work.mp4` (+ optional player tracks) | `spatial/scene.ply` |
 
 Orchestration: [JOBS.md](JOBS.md). Local v0 runs stages **3–5 in parallel** on Modal
 after `normalize`, then auto-calibrates and builds `court3d`. Actions/score later.

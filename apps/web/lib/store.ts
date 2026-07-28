@@ -357,6 +357,20 @@ export async function getBallTracks(
   return readArtifactJson<BallTracksFile>(videoId, "ball.tracks.json");
 }
 
+/** Video-scoped camera motion (like calibration) — not run-scoped yet. */
+export async function getCameraMotion(
+  videoId: string,
+): Promise<import("@volleyballai/types").CameraMotionFile | null> {
+  return readJsonFile(path.join(videoDir(videoId), "camera_motion.json"), null);
+}
+
+/** Video-scoped net tracks from settle → OpenAI net detect + FIVB PnP. */
+export async function getNetTracks(
+  videoId: string,
+): Promise<import("@volleyballai/types").NetTracksFile | null> {
+  return readJsonFile(path.join(videoDir(videoId), "net.tracks.json"), null);
+}
+
 export async function getCourtKeypoints(
   videoId: string,
 ): Promise<unknown | null> {

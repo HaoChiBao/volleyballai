@@ -97,6 +97,38 @@ def invert_homography(H: list[float]) -> list[float]:
     return [v / det for v in (A, D, G, B, E, Hh, C, F, I)]
 
 
+def apply_homography(H: list[float], p: dict[str, float]) -> dict[str, float]:
+    """Apply row-major 3×3 H to point {x,y}."""
+    x, y = float(p["x"]), float(p["y"])
+    denom = H[6] * x + H[7] * y + H[8]
+    if abs(denom) < 1e-9:
+        return {"x": x, "y": y}
+    return {
+        "x": (H[0] * x + H[1] * y + H[2]) / denom,
+        "y": (H[3] * x + H[4] * y + H[5]) / denom,
+    }
+
+
+def project_world_to_image(
+    pose: dict[str, Any],
+    X: float,
+    Y: float,
+    Z: float,
+) -> dict[str, float] | None:
+    """Project court-world meters (X length, Y width, Z up) → image pixels."""
+    R = pose["R"]
+    t = pose["t"]
+    xc = R[0] * X + R[1] * Y + R[2] * Z + t[0]
+    yc = R[3] * X + R[4] * Y + R[5] * Z + t[1]
+    zc = R[6] * X + R[7] * Y + R[8] * Z + t[2]
+    if zc <= 1e-6:
+        return None
+    return {
+        "x": pose["fx"] * xc / zc + pose["cx"],
+        "y": pose["fy"] * yc / zc + pose["cy"],
+    }
+
+
 def _mat_mul3(A: list[float], B: list[float]) -> list[float]:
     out = [0.0] * 9
     for r in range(3):

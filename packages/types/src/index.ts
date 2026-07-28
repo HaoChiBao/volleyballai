@@ -125,7 +125,7 @@ export interface CalibrationCamera {
   fov_y_deg: number;
 }
 
-export type CalibrationSource = "manual" | "auto_keypoints";
+export type CalibrationSource = "manual" | "auto_keypoints" | "net_settle";
 
 export interface Calibration {
   video_id: string;
@@ -213,6 +213,25 @@ export interface CourtKeypointsFrame {
   keypoints: CourtKeypoint[];
 }
 
+/** Gaussian splat environment from Modal Nerfstudio (`spatial/meta.json`). */
+export interface SpatialSceneMeta {
+  ok?: boolean;
+  method?: string;
+  max_iters?: number;
+  num_frames_target?: number;
+  appearance_embedding?: boolean;
+  transient_burn_touches?: number;
+  ply_bytes?: number;
+  elapsed_s?: number;
+  video_id?: string;
+  volume?: string;
+  local_ply?: string;
+  downloaded_bytes?: number;
+  note?: string;
+  available?: boolean;
+  ply_url?: string;
+}
+
 /** Auto court detection artifact (`court.keypoints.json`). */
 export interface CourtKeypointsFile {
   video_id: string;
@@ -228,6 +247,129 @@ export interface CourtKeypointsFile {
   frames: CourtKeypointsFrame[];
   detections?: number;
   run?: AnalysisRunInfo;
+}
+
+/** Camera-motion event for sparse net re-detect / timeline ticks. */
+export type CameraMotionEventType =
+  | "motion_start"
+  | "motion_peak"
+  | "motion_end";
+
+export interface CameraMotionEvent {
+  type: CameraMotionEventType;
+  t: number;
+  frame_index?: number;
+  score?: number;
+  /** Present on motion_end — pipeline should refresh net here. */
+  suggest_net_redetect?: boolean;
+}
+
+export interface CameraMotionSegment {
+  start_t: number;
+  end_t: number;
+  peak_t: number;
+  peak_score: number;
+  start_frame: number;
+  end_frame: number;
+}
+
+export interface CameraMotionSettlePoint {
+  t: number;
+  frame_index?: number;
+  /** motion_settled = after a pan; static_open = no motion in whole clip */
+  kind: "motion_settled" | "static_open" | string;
+  use_for_net_detect?: boolean;
+}
+
+export interface CameraMotionSettlePolicy {
+  /** True when the first motion starts near t=0 — no reliable pose yet. */
+  starts_unsettled: boolean;
+  start_unsettled_s?: number;
+  first_settle_t?: number | null;
+  /** If starts_unsettled, apply this settle's pose for [0, first_settle_t]. */
+  prefix_use_settle_t?: number | null;
+  note?: string;
+}
+
+/**
+ * Per-video camera motion artifact (`camera_motion.json`).
+ * Produced by `worker.test_camera_motion` / future pipeline stage.
+ * Samples omitted from the web payload to keep the file small.
+ */
+export interface CameraMotionFile {
+  video_id: string;
+  pipeline_version: string;
+  source?: "camera_motion_test" | "pipeline" | string;
+  method: "global_affine" | "phase_correlate" | "flow_median" | string;
+  duration_s?: number;
+  fps?: number;
+  sample_fps?: number;
+  analyze_max_side?: number;
+  thresholds?: Record<string, number>;
+  /** Merged motion segments (gaps ≤ merge_gap_s collapsed). */
+  segments: CameraMotionSegment[];
+  events: CameraMotionEvent[];
+  /** Times the camera has settled — primary ticks for net / pose refresh. */
+  settle_points?: CameraMotionSettlePoint[];
+  /** Settles + static_refresh samples (~2× density) for net redetect. */
+  net_sample_points?: CameraMotionSettlePoint[];
+  settle_policy?: CameraMotionSettlePolicy;
+  summary?: {
+    num_segments?: number;
+    num_segments_raw?: number;
+    num_settle_points?: number;
+    num_net_samples?: number;
+    time_moving_s?: number;
+    starts_unsettled?: boolean;
+    recommend?: string;
+  };
+}
+
+/** One settle-time net detection + FIVB PnP camera. */
+export interface NetTrackFrame {
+  t: number;
+  frame_index?: number;
+  trigger?: "settle" | string;
+  kind?: string;
+  net: {
+    top_left: Point2;
+    top_right: Point2;
+    bottom_right: Point2;
+    bottom_left: Point2;
+  };
+  camera?: CalibrationCamera | null;
+  H?: number[] | null;
+  reproj_err_px?: number;
+  score?: number;
+  mapping?: string;
+  ground_lines?: {
+    boundary?: [number, number][];
+    center?: [number, number][];
+    attack_a?: [number, number][];
+    attack_b?: [number, number][];
+  };
+  model?: string;
+  max_side?: number | null;
+}
+
+/** Per-video net tracks from settle → net detect (`net.tracks.json`). */
+export interface NetTracksFile {
+  video_id: string;
+  pipeline_version: string;
+  source?: "openai_net_settle" | string;
+  model?: string;
+  max_side?: number | null;
+  fivb?: Record<string, number>;
+  settle_policy?: CameraMotionSettlePolicy;
+  primary_t?: number;
+  frames: NetTrackFrame[];
+  summary?: {
+    num_settles?: number;
+    primary_t?: number;
+    primary_score?: number;
+    primary_reproj_err_px?: number;
+    starts_unsettled?: boolean;
+  };
 }
 
 export const PIPELINE_VERSION = "0.1.0";

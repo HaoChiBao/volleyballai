@@ -120,10 +120,21 @@ def _heatmap_peak(
     low_thresh: int = 170,
     min_radius: int = 10,
     max_radius: int = 25,
+    min_peak: float = 0.15,
 ) -> tuple[float | None, float | None, float]:
-    """Return (x, y in 1280×720 space, peak_conf 0..1)."""
-    hm_u8 = (heatmap * 255).astype(np.uint8)
+    """
+    Return (x, y in model 640×360 space, peak_conf 0..1).
+
+    Prefer argmax (stable); optionally snap with Hough when it agrees.
+    """
     peak = float(heatmap.max()) if heatmap.size else 0.0
+    if peak < min_peak:
+        return None, None, peak
+
+    y_m, x_m = np.unravel_index(int(np.argmax(heatmap)), heatmap.shape)
+    x_pred, y_pred = float(x_m), float(y_m)
+
+    hm_u8 = (heatmap * 255).astype(np.uint8)
     _ret, binary = cv2.threshold(hm_u8, low_thresh, 255, cv2.THRESH_BINARY)
     circles = cv2.HoughCircles(
         binary,
@@ -135,14 +146,12 @@ def _heatmap_peak(
         minRadius=min_radius,
         maxRadius=max_radius,
     )
-    if circles is None:
-        # Fallback: argmax if peak is strong enough
-        if peak < 0.35:
-            return None, None, peak
-        y, x = np.unravel_index(int(np.argmax(heatmap)), heatmap.shape)
-        return float(x * 2), float(y * 2), peak
-    x_pred = float(circles[0][0][0] * 2)
-    y_pred = float(circles[0][0][1] * 2)
+    if circles is not None:
+        cx = float(circles[0][0][0])
+        cy = float(circles[0][0][1])
+        # Prefer Hough when close to the heatmap peak.
+        if abs(cx - x_pred) < 25 and abs(cy - y_pred) < 25:
+            x_pred, y_pred = cx, cy
     return x_pred, y_pred, peak
 
 
@@ -188,27 +197,19 @@ def detect_tennis_court_image(
         out = model(inp_t)[0]
         pred = F.sigmoid(out).detach().cpu().numpy()
 
-    # Scale from reference 1280×720 → original frame
-    sx = w / float(REF_W)
-    sy = h / float(REF_H)
+    # Scale from model 640×360 → original frame (stretch, matching upstream resize).
+    sx = w / float(MODEL_W)
+    sy = h / float(MODEL_H)
 
     pts: list[list[float] | None] = []
     confs: list[float] = []
-    # Also try a lower Hough threshold for weak heatmaps on non-tennis domains.
     for kps_num in range(14):
-        x_ref, y_ref, peak = _heatmap_peak(pred[kps_num], low_thresh=low_thresh)
-        if x_ref is None or y_ref is None:
-            x_ref, y_ref, peak = _heatmap_peak(
-                pred[kps_num],
-                low_thresh=120,
-                min_radius=5,
-                max_radius=40,
-            )
-        if x_ref is None or y_ref is None:
+        x_m, y_m, peak = _heatmap_peak(pred[kps_num], low_thresh=low_thresh)
+        if x_m is None or y_m is None:
             pts.append(None)
             confs.append(0.0)
             continue
-        pts.append([x_ref * sx, y_ref * sy])
+        pts.append([x_m * sx, y_m * sy])
         confs.append(float(peak))
 
     keypoints, raw = normalize_from_tennis14(pts, confs)

@@ -70,42 +70,57 @@ export function PlayerOverlay({
             : "No tracks yet — run analysis"}
         </span>
       </div>
-      <div className="video-shell" style={{ position: "relative" }}>
-        <video ref={videoRef} src={mediaUrl} controls />
-        <svg
-          viewBox={`0 0 ${size.w} ${size.h}`}
-          style={{
-            position: "absolute",
-            inset: 0,
-            width: "100%",
-            height: "100%",
-            pointerEvents: "none",
-          }}
+      <div className="video-shell analysis-shell">
+        <div
+          className="analysis-video-box"
+          style={
+            size.w > 0 && size.h > 0
+              ? { aspectRatio: `${size.w} / ${size.h}` }
+              : undefined
+          }
         >
-          {boxes.map((b) => (
-            <g key={b.track_id}>
-              <rect
-                x={b.bbox[0]}
-                y={b.bbox[1]}
-                width={b.bbox[2]}
-                height={b.bbox[3]}
-                fill="none"
-                stroke={b.color}
-                strokeWidth={Math.max(2, size.w / 400)}
-              />
-              <text
-                x={b.bbox[0] + 4}
-                y={b.bbox[1] - 6}
-                fill={b.color}
-                fontSize={Math.max(14, size.w / 60)}
-                fontFamily="sans-serif"
-                fontWeight="700"
-              >
-                #{b.track_id}
-              </text>
-            </g>
-          ))}
-        </svg>
+          <video
+            ref={videoRef}
+            src={mediaUrl}
+            controls
+            onLoadedMetadata={(e) => {
+              const el = e.currentTarget;
+              setSize({
+                w: el.videoWidth || 1280,
+                h: el.videoHeight || 720,
+              });
+            }}
+          />
+          <svg
+            className="analysis-overlay"
+            viewBox={`0 0 ${size.w} ${size.h}`}
+            preserveAspectRatio="none"
+          >
+            {boxes.map((b) => (
+              <g key={b.track_id}>
+                <rect
+                  x={b.bbox[0]}
+                  y={b.bbox[1]}
+                  width={b.bbox[2]}
+                  height={b.bbox[3]}
+                  fill="none"
+                  stroke={b.color}
+                  strokeWidth={Math.max(2, size.w / 400)}
+                />
+                <text
+                  x={b.bbox[0] + 4}
+                  y={b.bbox[1] - 6}
+                  fill={b.color}
+                  fontSize={Math.max(14, size.w / 60)}
+                  fontFamily="sans-serif"
+                  fontWeight="700"
+                >
+                  #{b.track_id}
+                </text>
+              </g>
+            ))}
+          </svg>
+        </div>
       </div>
     </div>
   );

@@ -2,7 +2,8 @@
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
-import { useMemo, useState } from "react";
+import dynamic from "next/dynamic";
+import { useEffect, useMemo, useState } from "react";
 import {
   BoxGeometry,
   EdgesGeometry,
@@ -14,9 +15,16 @@ import type {
   BallTracksFile,
   Calibration,
   CalibrationCamera,
+  NetTracksFile,
   PlayersTracksFile,
 } from "@volleyballai/types";
 import { bracketFrames, lerp } from "@/lib/trackInterp";
+import { netCameraAtTime } from "@/lib/netTracks";
+
+const GaussianSplat = dynamic(
+  () => import("./GaussianSplat").then((m) => m.GaussianSplat),
+  { ssr: false },
+);
 
 export type Court3dSample = {
   t: number;
@@ -203,24 +211,41 @@ export function Court3D({
   calibration,
   tracks,
   ball,
+  netTracks,
   currentTime,
   compact,
+  splatUrl,
 }: {
   court3d: Court3dFile | null;
   calibration?: Calibration | null;
   tracks?: PlayersTracksFile | null;
   ball?: BallTracksFile | null;
+  /** Settle → net PnP cameras; overrides single calibration.camera by time. */
+  netTracks?: NetTracksFile | null;
   currentTime: number;
   /** Fill parent height (side-by-side pane) */
   compact?: boolean;
+  /** Optional Gaussian splat .ply URL (Modal Nerfstudio export) */
+  splatUrl?: string | null;
 }) {
   const cameraPose = useMemo(() => {
-    const cam = calibration?.camera ?? court3d?.camera ?? null;
+    const fromNet = netCameraAtTime(netTracks, currentTime);
+    const cam: CalibrationCamera | null =
+      fromNet ?? calibration?.camera ?? court3d?.camera ?? null;
     return cam ? toPose(cam) : null;
-  }, [calibration?.camera, court3d?.camera]);
+  }, [netTracks, currentTime, calibration?.camera, court3d?.camera]);
 
-  // Orbit free by default so the side pane is always draggable; matched cam is opt-in.
+  // Orbit free by default so drag/pan/zoom always works; matched cam is opt-in.
   const [matchView, setMatchView] = useState(false);
+  const [showSplat, setShowSplat] = useState(Boolean(splatUrl));
+  const [showCourtMesh, setShowCourtMesh] = useState(!splatUrl);
+
+  useEffect(() => {
+    if (splatUrl) {
+      setShowSplat(true);
+      setShowCourtMesh(false);
+    }
+  }, [splatUrl]);
 
   const livePlayers = useMemo(
     () => interpolatePlayers(tracks ?? null, currentTime),
@@ -254,13 +279,38 @@ export function Court3D({
     9, 14, 22,
   ];
   const defaultFov = threeCam?.fov ?? 42;
-  const lookTarget = threeCam?.lookAt ?? [length / 2, 0, width / 2];
+  // Stable orbit pivot — do not retarget from matched lookAt while scrubbing
+  // (that fights the user and makes controls feel broken).
+  const orbitTarget = useMemo(
+    (): [number, number, number] => [length / 2, 0, width / 2],
+    [length, width],
+  );
 
   return (
     <div className={compact ? "court3d-pane stack" : "card stack"}>
       <div className="row between">
         <h2>{compact ? "3D court" : "3D court"}</h2>
         <div className="row" style={{ gap: "0.5rem" }}>
+          {splatUrl ? (
+            <button
+              type="button"
+              className={`toggle-chip${showSplat ? " active" : ""}`}
+              onClick={() => setShowSplat((v) => !v)}
+              title="Toggle Gaussian splat environment (Nerfstudio)"
+            >
+              {showSplat ? "Splat on" : "Splat off"}
+            </button>
+          ) : null}
+          {splatUrl ? (
+            <button
+              type="button"
+              className={`toggle-chip${showCourtMesh ? " active" : ""}`}
+              onClick={() => setShowCourtMesh((v) => !v)}
+              title="Toggle procedural FIVB court mesh"
+            >
+              {showCourtMesh ? "Court on" : "Court off"}
+            </button>
+          ) : null}
           {cameraPose ? (
             <button
               type="button"
@@ -305,14 +355,13 @@ export function Court3D({
           shadows
           camera={{ position: defaultPos, fov: defaultFov }}
           style={{ width: "100%", height: "100%" }}
-          // Keep R3F from swallowing scroll on the page; orbit uses pointer drag.
-          onPointerDown={(e) => {
-            (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-          }}
         >
           <ambientLight intensity={0.75} />
           <directionalLight position={[12, 20, 8]} intensity={1.1} castShadow />
-          <CourtMesh length={length} width={width} />
+          {showCourtMesh || !splatUrl ? (
+            <CourtMesh length={length} width={width} />
+          ) : null}
+          {splatUrl && showSplat ? <GaussianSplat url={splatUrl} /> : null}
           <Players markers={markers} />
           {ballPos ? <Ball ball={ballPos} /> : null}
           {cameraPose ? (
@@ -320,11 +369,11 @@ export function Court3D({
           ) : null}
           <OrbitControls
             makeDefault
-            enabled={!matchView || !cameraPose}
+            enabled={!matchView}
             enableRotate
             enablePan
             enableZoom
-            target={lookTarget as [number, number, number]}
+            target={orbitTarget}
             enableDamping
             dampingFactor={0.08}
             minDistance={3}

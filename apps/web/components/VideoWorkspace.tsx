@@ -6,7 +6,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   BallTracksFile,
   Calibration,
+  CameraMotionFile,
   Job,
+  NetTracksFile,
   PlayersTracksFile,
   Video,
 } from "@volleyballai/types";
@@ -52,6 +54,11 @@ export function VideoWorkspace({
   const [tracks, setTracks] = useState(initialTracks);
   const [ball, setBall] = useState(initialBall);
   const [court3d, setCourt3d] = useState(initialCourt3d);
+  const [cameraMotion, setCameraMotion] = useState<CameraMotionFile | null>(
+    null,
+  );
+  const [netTracks, setNetTracks] = useState<NetTracksFile | null>(null);
+  const [splatUrl, setSplatUrl] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const triedAutoCal = useRef(false);
 
@@ -63,11 +70,14 @@ export function VideoWorkspace({
     tracks?.run ?? ball?.run ?? initialJobs[0]?.run ?? null;
 
   const reloadArtifacts = useCallback(async () => {
-    const [tRes, bRes, cRes, calRes] = await Promise.all([
+    const [tRes, bRes, cRes, calRes, sRes, mRes, nRes] = await Promise.all([
       fetch(`/api/videos/${video.id}/tracks`, { cache: "no-store" }),
       fetch(`/api/videos/${video.id}/ball`, { cache: "no-store" }),
       fetch(`/api/videos/${video.id}/court3d`, { cache: "no-store" }),
       fetch(`/api/videos/${video.id}/calibration`, { cache: "no-store" }),
+      fetch(`/api/videos/${video.id}/spatial?kind=meta`, { cache: "no-store" }),
+      fetch(`/api/videos/${video.id}/camera-motion`, { cache: "no-store" }),
+      fetch(`/api/videos/${video.id}/net`, { cache: "no-store" }),
     ]);
     if (tRes.ok) {
       const data = (await tRes.json()) as { tracks: PlayersTracksFile | null };
@@ -87,13 +97,70 @@ export function VideoWorkspace({
       };
       setCalibration(data.calibration);
     }
+    if (sRes.ok) {
+      const data = (await sRes.json()) as {
+        spatial: { available?: boolean; ply_url?: string } | null;
+      };
+      setSplatUrl(
+        data.spatial?.available && data.spatial.ply_url
+          ? data.spatial.ply_url
+          : null,
+      );
+    }
+    if (mRes.ok) {
+      const data = (await mRes.json()) as {
+        cameraMotion: CameraMotionFile | null;
+      };
+      setCameraMotion(data.cameraMotion);
+    }
+    if (nRes.ok) {
+      const data = (await nRes.json()) as { netTracks: NetTracksFile | null };
+      setNetTracks(data.netTracks);
+    }
     router.refresh();
   }, [video.id, router]);
 
-  // Prefer YOLO court keypoints for 3D when no manual calibration exists.
+  useEffect(() => {
+    void (async () => {
+      const [mRes, nRes] = await Promise.all([
+        fetch(`/api/videos/${video.id}/camera-motion`, { cache: "no-store" }),
+        fetch(`/api/videos/${video.id}/net`, { cache: "no-store" }),
+      ]);
+      if (mRes.ok) {
+        const data = (await mRes.json()) as {
+          cameraMotion: CameraMotionFile | null;
+        };
+        setCameraMotion(data.cameraMotion);
+      }
+      if (nRes.ok) {
+        const data = (await nRes.json()) as { netTracks: NetTracksFile | null };
+        setNetTracks(data.netTracks);
+      }
+    })();
+  }, [video.id]);
+
+  useEffect(() => {
+    void (async () => {
+      const sRes = await fetch(`/api/videos/${video.id}/spatial?kind=meta`, {
+        cache: "no-store",
+      });
+      if (!sRes.ok) return;
+      const data = (await sRes.json()) as {
+        spatial: { available?: boolean; ply_url?: string } | null;
+      };
+      setSplatUrl(
+        data.spatial?.available && data.spatial.ply_url
+          ? data.spatial.ply_url
+          : null,
+      );
+    })();
+  }, [video.id]);
+
+  // Prefer YOLO court keypoints for 3D when no manual / net-settle calibration exists.
   useEffect(() => {
     if (triedAutoCal.current) return;
     if (calibration?.source === "manual") return;
+    if (calibration?.source === "net_settle") return;
     if (
       calibration?.source === "auto_keypoints" &&
       calibration.H &&
@@ -142,12 +209,26 @@ export function VideoWorkspace({
           {calibration?.H
             ? calibration.source === "auto_keypoints"
               ? "auto (YOLO)"
-              : calibration.source === "manual"
-                ? "manual"
-                : "set"
+              : calibration.source === "net_settle"
+                ? "net settle"
+                : calibration.source === "manual"
+                  ? "manual"
+                  : "set"
             : "needed"}
         </span>
         <span>Cam {calibration?.camera ? "matched" : "—"}</span>
+        <span>
+          Motion{" "}
+          {cameraMotion
+            ? `${cameraMotion.settle_points?.length ?? cameraMotion.summary?.num_settle_points ?? "—"} settles / ${cameraMotion.summary?.num_segments ?? cameraMotion.segments.length} segs`
+            : "—"}
+        </span>
+        <span>
+          Net{" "}
+          {netTracks?.frames?.length
+            ? `${netTracks.frames.length} settles`
+            : "—"}
+        </span>
       </div>
       {latestRun?.started_at ? (
         <div className="stack" style={{ gap: "0.15rem" }}>
@@ -201,6 +282,9 @@ export function VideoWorkspace({
                 <p className="hint" style={{ margin: 0 }}>
                   Video and 3D court share the camera from court keypoints
                   (YOLO) or your manual lines. Ball updates with playback.
+                  {splatUrl
+                    ? " Gaussian splat environment loaded (orbit the gym; live players/ball from tracks)."
+                    : ""}
                 </p>
               </div>
             </div>
@@ -217,6 +301,8 @@ export function VideoWorkspace({
                 tracks={tracks}
                 ball={ball}
                 court3d={court3d}
+                cameraMotion={cameraMotion}
+                netTracks={netTracks}
                 onTime={setCurrentTime}
               />
               <Court3D
@@ -225,7 +311,9 @@ export function VideoWorkspace({
                 calibration={calibration}
                 tracks={tracks}
                 ball={ball}
+                netTracks={netTracks}
                 currentTime={currentTime}
+                splatUrl={splatUrl}
               />
             </div>
           </section>
