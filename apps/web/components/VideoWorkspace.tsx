@@ -34,12 +34,37 @@ const Court3D = dynamic(
   },
 );
 
+/** Fetch that returns null on HTTP / network failure (never throws). */
+async function fetchOk(
+  url: string,
+  init?: RequestInit,
+): Promise<Response | null> {
+  try {
+    const res = await fetch(url, { cache: "no-store", ...init });
+    return res.ok ? res : null;
+  } catch {
+    // Aborts, offline, HMR, extension-intercepted fetch, etc.
+    return null;
+  }
+}
+
+async function readJson<T>(res: Response | null): Promise<T | null> {
+  if (!res) return null;
+  try {
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 export function VideoWorkspace({
   video,
   initialJobs,
   initialCalibration,
   initialTracks,
   initialBall,
+  initialBallYolo,
+  initialBallWasb,
   initialCourt3d,
 }: {
   video: Video;
@@ -47,12 +72,16 @@ export function VideoWorkspace({
   initialCalibration: Calibration | null;
   initialTracks: PlayersTracksFile | null;
   initialBall: BallTracksFile | null;
+  initialBallYolo: BallTracksFile | null;
+  initialBallWasb: BallTracksFile | null;
   initialCourt3d: Court3dFile | null;
 }) {
   const router = useRouter();
   const [calibration, setCalibration] = useState(initialCalibration);
   const [tracks, setTracks] = useState(initialTracks);
   const [ball, setBall] = useState(initialBall);
+  const [ballYolo, setBallYolo] = useState(initialBallYolo);
+  const [ballWasb, setBallWasb] = useState(initialBallWasb);
   const [court3d, setCourt3d] = useState(initialCourt3d);
   const [cameraMotion, setCameraMotion] = useState<CameraMotionFile | null>(
     null,
@@ -71,89 +100,84 @@ export function VideoWorkspace({
 
   const reloadArtifacts = useCallback(async () => {
     const [tRes, bRes, cRes, calRes, sRes, mRes, nRes] = await Promise.all([
-      fetch(`/api/videos/${video.id}/tracks`, { cache: "no-store" }),
-      fetch(`/api/videos/${video.id}/ball`, { cache: "no-store" }),
-      fetch(`/api/videos/${video.id}/court3d`, { cache: "no-store" }),
-      fetch(`/api/videos/${video.id}/calibration`, { cache: "no-store" }),
-      fetch(`/api/videos/${video.id}/spatial?kind=meta`, { cache: "no-store" }),
-      fetch(`/api/videos/${video.id}/camera-motion`, { cache: "no-store" }),
-      fetch(`/api/videos/${video.id}/net`, { cache: "no-store" }),
+      fetchOk(`/api/videos/${video.id}/tracks`),
+      fetchOk(`/api/videos/${video.id}/ball`),
+      fetchOk(`/api/videos/${video.id}/court3d`),
+      fetchOk(`/api/videos/${video.id}/calibration`),
+      fetchOk(`/api/videos/${video.id}/spatial?kind=meta`),
+      fetchOk(`/api/videos/${video.id}/camera-motion`),
+      fetchOk(`/api/videos/${video.id}/net`),
     ]);
-    if (tRes.ok) {
-      const data = (await tRes.json()) as { tracks: PlayersTracksFile | null };
-      setTracks(data.tracks);
+    const tracksData = await readJson<{ tracks: PlayersTracksFile | null }>(tRes);
+    if (tracksData) setTracks(tracksData.tracks);
+    const ballData = await readJson<{
+      ball: BallTracksFile | null;
+      ballYolo?: BallTracksFile | null;
+      ballWasb?: BallTracksFile | null;
+    }>(bRes);
+    if (ballData) {
+      setBall(ballData.ball);
+      if ("ballYolo" in ballData) setBallYolo(ballData.ballYolo ?? null);
+      if ("ballWasb" in ballData) setBallWasb(ballData.ballWasb ?? null);
     }
-    if (bRes.ok) {
-      const data = (await bRes.json()) as { ball: BallTracksFile | null };
-      setBall(data.ball);
-    }
-    if (cRes.ok) {
-      const data = (await cRes.json()) as { court3d: Court3dFile | null };
-      setCourt3d(data.court3d);
-    }
-    if (calRes.ok) {
-      const data = (await calRes.json()) as {
-        calibration: Calibration | null;
-      };
-      setCalibration(data.calibration);
-    }
-    if (sRes.ok) {
-      const data = (await sRes.json()) as {
-        spatial: { available?: boolean; ply_url?: string } | null;
-      };
+    const courtData = await readJson<{ court3d: Court3dFile | null }>(cRes);
+    if (courtData) setCourt3d(courtData.court3d);
+    const calData = await readJson<{ calibration: Calibration | null }>(calRes);
+    if (calData) setCalibration(calData.calibration);
+    const spatialData = await readJson<{
+      spatial: { available?: boolean; ply_url?: string } | null;
+    }>(sRes);
+    if (spatialData) {
       setSplatUrl(
-        data.spatial?.available && data.spatial.ply_url
-          ? data.spatial.ply_url
+        spatialData.spatial?.available && spatialData.spatial.ply_url
+          ? spatialData.spatial.ply_url
           : null,
       );
     }
-    if (mRes.ok) {
-      const data = (await mRes.json()) as {
-        cameraMotion: CameraMotionFile | null;
-      };
-      setCameraMotion(data.cameraMotion);
-    }
-    if (nRes.ok) {
-      const data = (await nRes.json()) as { netTracks: NetTracksFile | null };
-      setNetTracks(data.netTracks);
-    }
+    const motionData = await readJson<{
+      cameraMotion: CameraMotionFile | null;
+    }>(mRes);
+    if (motionData) setCameraMotion(motionData.cameraMotion);
+    const netData = await readJson<{ netTracks: NetTracksFile | null }>(nRes);
+    if (netData) setNetTracks(netData.netTracks);
     router.refresh();
   }, [video.id, router]);
 
+  // Optional overlays: camera motion, net, spatial meta (fail soft).
   useEffect(() => {
+    const ac = new AbortController();
     void (async () => {
-      const [mRes, nRes] = await Promise.all([
-        fetch(`/api/videos/${video.id}/camera-motion`, { cache: "no-store" }),
-        fetch(`/api/videos/${video.id}/net`, { cache: "no-store" }),
+      const [mRes, nRes, sRes] = await Promise.all([
+        fetchOk(`/api/videos/${video.id}/camera-motion`, {
+          signal: ac.signal,
+        }),
+        fetchOk(`/api/videos/${video.id}/net`, { signal: ac.signal }),
+        fetchOk(`/api/videos/${video.id}/spatial?kind=meta`, {
+          signal: ac.signal,
+        }),
       ]);
-      if (mRes.ok) {
-        const data = (await mRes.json()) as {
-          cameraMotion: CameraMotionFile | null;
-        };
-        setCameraMotion(data.cameraMotion);
-      }
-      if (nRes.ok) {
-        const data = (await nRes.json()) as { netTracks: NetTracksFile | null };
-        setNetTracks(data.netTracks);
-      }
-    })();
-  }, [video.id]);
+      if (ac.signal.aborted) return;
 
-  useEffect(() => {
-    void (async () => {
-      const sRes = await fetch(`/api/videos/${video.id}/spatial?kind=meta`, {
-        cache: "no-store",
-      });
-      if (!sRes.ok) return;
-      const data = (await sRes.json()) as {
+      const motionData = await readJson<{
+        cameraMotion: CameraMotionFile | null;
+      }>(mRes);
+      if (motionData) setCameraMotion(motionData.cameraMotion);
+
+      const netData = await readJson<{ netTracks: NetTracksFile | null }>(nRes);
+      if (netData) setNetTracks(netData.netTracks);
+
+      const spatialData = await readJson<{
         spatial: { available?: boolean; ply_url?: string } | null;
-      };
-      setSplatUrl(
-        data.spatial?.available && data.spatial.ply_url
-          ? data.spatial.ply_url
-          : null,
-      );
+      }>(sRes);
+      if (spatialData) {
+        setSplatUrl(
+          spatialData.spatial?.available && spatialData.spatial.ply_url
+            ? spatialData.spatial.ply_url
+            : null,
+        );
+      }
     })();
+    return () => ac.abort();
   }, [video.id]);
 
   // Prefer YOLO court keypoints for 3D when no manual / net-settle calibration exists.
@@ -169,25 +193,26 @@ export function VideoWorkspace({
       return;
     }
     triedAutoCal.current = true;
-    let cancelled = false;
+    const ac = new AbortController();
     void (async () => {
-      const res = await fetch(`/api/videos/${video.id}/calibrate-auto`, {
+      const res = await fetchOk(`/api/videos/${video.id}/calibrate-auto`, {
         method: "POST",
+        signal: ac.signal,
       });
-      if (!cancelled && res.ok) {
+      if (ac.signal.aborted) return;
+      if (res) {
         await reloadArtifacts();
         return;
       }
-      if (!cancelled && calibration?.H && !calibration.camera) {
-        const r2 = await fetch(`/api/videos/${video.id}/reproject`, {
+      if (calibration?.H && !calibration.camera) {
+        const r2 = await fetchOk(`/api/videos/${video.id}/reproject`, {
           method: "POST",
+          signal: ac.signal,
         });
-        if (r2.ok) await reloadArtifacts();
+        if (!ac.signal.aborted && r2) await reloadArtifacts();
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => ac.abort();
   }, [
     calibration?.source,
     calibration?.H,
@@ -204,6 +229,8 @@ export function VideoWorkspace({
         <span>Thumb {video.has_thumb ? "ready" : "pending"}</span>
         <span>Players {tracks?.players.length ?? 0}</span>
         <span>Ball frames {ball?.frames.length ?? 0}</span>
+        <span>YOLO ball {ballYolo?.frames.length ?? 0}</span>
+        <span>WASB ball {ballWasb?.frames.length ?? 0}</span>
         <span>
           Cal{" "}
           {calibration?.H
@@ -300,6 +327,8 @@ export function VideoWorkspace({
                 calibration={calibration}
                 tracks={tracks}
                 ball={ball}
+                ballYolo={ballYolo}
+                ballWasb={ballWasb}
                 court3d={court3d}
                 cameraMotion={cameraMotion}
                 netTracks={netTracks}
@@ -311,6 +340,8 @@ export function VideoWorkspace({
                 calibration={calibration}
                 tracks={tracks}
                 ball={ball}
+                ballYolo={ballYolo}
+                ballWasb={ballWasb}
                 netTracks={netTracks}
                 currentTime={currentTime}
                 splatUrl={splatUrl}

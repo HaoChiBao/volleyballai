@@ -81,18 +81,109 @@ export function resamplePolygon(
   return out;
 }
 
+/** Squared distance sum between corresponding polygon vertices. */
+function outlineAlignCost(
+  a: [number, number][],
+  b: [number, number][],
+  shift: number,
+  reverse: boolean,
+): number {
+  const n = a.length;
+  let cost = 0;
+  for (let i = 0; i < n; i++) {
+    const j = reverse
+      ? (shift - i + n * 2) % n
+      : (i + shift) % n;
+    const dx = a[i][0] - b[j][0];
+    const dy = a[i][1] - b[j][1];
+    cost += dx * dx + dy * dy;
+  }
+  return cost;
+}
+
+/**
+ * Rotate / optionally reverse `b` so vertices best match `a`.
+ * SAM mask contours often start at different points (or flip winding),
+ * which makes naive lerp look like the blob is flickering / jumping.
+ */
+export function alignOutline(
+  a: [number, number][],
+  b: [number, number][],
+): [number, number][] {
+  const n = a.length;
+  if (n === 0 || b.length !== n) return b;
+  let bestShift = 0;
+  let bestReverse = false;
+  let bestCost = Infinity;
+  for (const reverse of [false, true]) {
+    for (let shift = 0; shift < n; shift++) {
+      const cost = outlineAlignCost(a, b, shift, reverse);
+      if (cost < bestCost) {
+        bestCost = cost;
+        bestShift = shift;
+        bestReverse = reverse;
+      }
+    }
+  }
+  const out: [number, number][] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const j = bestReverse
+      ? (bestShift - i + n * 2) % n
+      : (i + bestShift) % n;
+    out[i] = b[j];
+  }
+  return out;
+}
+
 export function lerpOutline(
   a: [number, number][] | undefined,
   b: [number, number][] | undefined,
   u: number,
-  n = 48,
+  n = 64,
 ): [number, number][] | undefined {
   if ((!a || a.length < 3) && (!b || b.length < 3)) return undefined;
   const ra = resamplePolygon(a && a.length >= 3 ? a : b!, n);
-  const rb = resamplePolygon(b && b.length >= 3 ? b : a!, n);
+  const rbRaw = resamplePolygon(b && b.length >= 3 ? b : a!, n);
+  const rb = alignOutline(ra, rbRaw);
+  // Ease endpoints so morph settles instead of hard-stepping at sample hits.
+  const s = u * u * (3 - 2 * u);
   return ra.map((p, i) => [
-    lerp(p[0], rb[i][0], u),
-    lerp(p[1], rb[i][1], u),
+    lerp(p[0], rb[i][0], s),
+    lerp(p[1], rb[i][1], s),
+  ]);
+}
+
+/** Temporal EMA toward a target outline (same vertex count). */
+export function smoothOutlineToward(
+  prev: [number, number][] | undefined,
+  target: [number, number][],
+  alpha: number,
+  /** If previous centroid is farther than this (px), snap instead of easing. */
+  snapDistance = 80,
+): [number, number][] {
+  if (!prev || prev.length !== target.length) {
+    return target.map((p) => [p[0], p[1]] as [number, number]);
+  }
+  const aligned = alignOutline(prev, target);
+  let pcx = 0;
+  let pcy = 0;
+  let tcx = 0;
+  let tcy = 0;
+  for (let i = 0; i < prev.length; i++) {
+    pcx += prev[i][0];
+    pcy += prev[i][1];
+    tcx += aligned[i][0];
+    tcy += aligned[i][1];
+  }
+  const n = prev.length;
+  const dist = Math.hypot(pcx / n - tcx / n, pcy / n - tcy / n);
+  if (dist > snapDistance) {
+    return aligned.map((p) => [p[0], p[1]] as [number, number]);
+  }
+  const a = Math.min(1, Math.max(0, alpha));
+  return prev.map((p, i) => [
+    lerp(p[0], aligned[i][0], a),
+    lerp(p[1], aligned[i][1], a),
   ]);
 }
 

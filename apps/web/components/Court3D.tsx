@@ -1,7 +1,7 @@
 "use client";
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
+import { Html, OrbitControls } from "@react-three/drei";
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -20,6 +20,10 @@ import type {
 } from "@volleyballai/types";
 import { bracketFrames, lerp } from "@/lib/trackInterp";
 import { netCameraAtTime } from "@/lib/netTracks";
+import {
+  playerColorForTrackId,
+  playerLabelForTrackId,
+} from "@/lib/playerStyle";
 
 const GaussianSplat = dynamic(
   () => import("./GaussianSplat").then((m) => m.GaussianSplat),
@@ -37,8 +41,6 @@ export type Court3dFile = {
   samples: Court3dSample[];
   camera?: CalibrationCamera | null;
 };
-
-const COLORS = ["#111111", "#333333", "#555555", "#777777", "#999999", "#bbbbbb"];
 
 function toPose(cam: CalibrationCamera | CameraPose): CameraPose {
   return {
@@ -106,26 +108,59 @@ function CourtMesh({ length, width }: { length: number; width: number }) {
 
 function Players({
   markers,
+  roster,
 }: {
   markers: { track_id: number; x: number; y: number; z: number }[];
+  /** Full `tracks.players` list — same order as 2D playlist #1, #2, … */
+  roster?: { track_id: number }[];
 }) {
   return (
     <group>
-      {markers.map((m, i) => (
-        <mesh key={m.track_id} position={[m.x, 0.9, m.y]} castShadow>
-          <capsuleGeometry args={[0.25, 1.2, 4, 8]} />
-          <meshStandardMaterial color={COLORS[i % COLORS.length]} />
-        </mesh>
-      ))}
+      {markers.map((m) => {
+        const color = playerColorForTrackId(roster, m.track_id);
+        const label = playerLabelForTrackId(roster, m.track_id);
+        return (
+          <group key={m.track_id} position={[m.x, 0, m.y]}>
+            <mesh position={[0, 0.9, 0]} castShadow>
+              <capsuleGeometry args={[0.25, 1.2, 4, 8]} />
+              <meshStandardMaterial color={color} />
+            </mesh>
+            {label != null ? (
+              <Html
+                position={[0, 2.05, 0]}
+                center
+                style={{
+                  pointerEvents: "none",
+                  userSelect: "none",
+                  fontFamily: "ui-sans-serif, system-ui, sans-serif",
+                  fontWeight: 700,
+                  fontSize: "12px",
+                  color,
+                  textShadow: "0 0 3px #fff, 0 0 2px #fff, 0 1px 2px rgba(0,0,0,0.45)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                #{label}
+              </Html>
+            ) : null}
+          </group>
+        );
+      })}
     </group>
   );
 }
 
-function Ball({ ball }: { ball: { x: number; y: number; z: number } }) {
+function Ball({
+  ball,
+  color = "#0a0a0a",
+}: {
+  ball: { x: number; y: number; z: number };
+  color?: string;
+}) {
   return (
     <mesh position={[ball.x, ball.z, ball.y]} castShadow>
       <sphereGeometry args={[0.105, 24, 24]} />
-      <meshStandardMaterial color="#0a0a0a" />
+      <meshStandardMaterial color={color} />
     </mesh>
   );
 }
@@ -191,7 +226,8 @@ function interpolateBall3d(
   if (!ball?.frames.length) return null;
   const frames = ball.frames.filter((f) => f.court_xyz != null);
   if (!frames.length) return null;
-  const br = bracketFrames(frames, t, 0.2);
+  // Match AnalysisPlayer: bridge occlusion gaps so the 3D ball does not blink out.
+  const br = bracketFrames(frames, t, 1.5);
   if (!br) return null;
   if (br.kind === "lerp") {
     const a = br.a.court_xyz!;
@@ -211,6 +247,8 @@ export function Court3D({
   calibration,
   tracks,
   ball,
+  ballYolo,
+  ballWasb,
   netTracks,
   currentTime,
   compact,
@@ -220,6 +258,10 @@ export function Court3D({
   calibration?: Calibration | null;
   tracks?: PlayersTracksFile | null;
   ball?: BallTracksFile | null;
+  /** SetOptics YOLO comparison tracks (optional). */
+  ballYolo?: BallTracksFile | null;
+  /** WASB HRNet raw comparison tracks (optional). */
+  ballWasb?: BallTracksFile | null;
   /** Settle → net PnP cameras; overrides single calibration.camera by time. */
   netTracks?: NetTracksFile | null;
   currentTime: number;
@@ -239,6 +281,10 @@ export function Court3D({
   const [matchView, setMatchView] = useState(false);
   const [showSplat, setShowSplat] = useState(Boolean(splatUrl));
   const [showCourtMesh, setShowCourtMesh] = useState(!splatUrl);
+  const [showPlayers, setShowPlayers] = useState(true);
+  const [showBallVballnet, setShowBallVballnet] = useState(true);
+  const [showBallYolo, setShowBallYolo] = useState(true);
+  const [showBallWasb, setShowBallWasb] = useState(true);
 
   useEffect(() => {
     if (splatUrl) {
@@ -255,6 +301,14 @@ export function Court3D({
     () => interpolateBall3d(ball ?? null, currentTime),
     [ball, currentTime],
   );
+  const liveBallYolo = useMemo(
+    () => interpolateBall3d(ballYolo ?? null, currentTime),
+    [ballYolo, currentTime],
+  );
+  const liveBallWasb = useMemo(
+    () => interpolateBall3d(ballWasb ?? null, currentTime),
+    [ballWasb, currentTime],
+  );
 
   const sample = useMemo(() => {
     if (!court3d?.samples?.length) return null;
@@ -266,6 +320,10 @@ export function Court3D({
   const markers =
     livePlayers.length > 0 ? livePlayers : (sample?.players ?? []);
   const ballPos = liveBall ?? sample?.ball ?? null;
+  const ballYoloPos = liveBallYolo;
+  const ballWasbPos = liveBallWasb;
+  const hasYoloBall = Boolean(ballYolo?.frames?.length);
+  const hasWasbBall = Boolean(ballWasb?.frames?.length);
 
   const length = court3d?.court.length_m ?? calibration?.court.length_m ?? 18;
   const width = court3d?.court.width_m ?? calibration?.court.width_m ?? 9;
@@ -325,31 +383,63 @@ export function Court3D({
               {matchView ? "Matched cam" : "Orbit free"}
             </button>
           ) : null}
+          <button
+            type="button"
+            className={`toggle-chip${showPlayers ? " active" : ""}`}
+            onClick={() => setShowPlayers((v) => !v)}
+            title="Toggle 3D player capsules"
+          >
+            Players {showPlayers ? "on" : "off"}
+          </button>
+          <button
+            type="button"
+            className={`toggle-chip ball-vballnet${showBallVballnet ? " active" : ""}`}
+            onClick={() => setShowBallVballnet((v) => !v)}
+            title="Toggle VballNet 3D ball (yellow/black)"
+          >
+            VballNet {showBallVballnet ? "on" : "off"}
+          </button>
+          <button
+            type="button"
+            className={`toggle-chip ball-yolo${showBallYolo ? " active" : ""}`}
+            onClick={() => setShowBallYolo((v) => !v)}
+            title={
+              hasYoloBall
+                ? "Toggle SetOptics YOLO 3D ball (cyan)"
+                : "Re-run analysis after deploying track_ball_yolo"
+            }
+            disabled={!hasYoloBall}
+          >
+            YOLO {showBallYolo && hasYoloBall ? "on" : "off"}
+          </button>
+          <button
+            type="button"
+            className={`toggle-chip ball-wasb${showBallWasb ? " active" : ""}`}
+            onClick={() => setShowBallWasb((v) => !v)}
+            title={
+              hasWasbBall
+                ? "Toggle WASB 3D ball (magenta)"
+                : "Re-run analysis after deploying track_ball_wasb"
+            }
+            disabled={!hasWasbBall}
+          >
+            WASB {showBallWasb && hasWasbBall ? "on" : "off"}
+          </button>
           <span className="meta-line">
-            {markers.length} players
-            {ballPos ? " + ball" : ""} @ {currentTime.toFixed(2)}s
+            {showPlayers ? markers.length : 0} players
+            {showBallVballnet && ballPos ? " + VballNet" : ""}
+            {showBallYolo && ballYoloPos ? " + YOLO" : ""}
+            {showBallWasb && ballWasbPos ? " + WASB" : ""} @{" "}
+            {currentTime.toFixed(2)}s
             {!matchView ? " · drag to orbit" : ""}
           </span>
         </div>
       </div>
       <div
         className="video-shell court3d-canvas"
-        style={
-          compact
-            ? {
-                flex: 1,
-                minHeight: 280,
-                background: "#e8e8e8",
-                touchAction: "none",
-                cursor: matchView ? "default" : "grab",
-              }
-            : {
-                height: 360,
-                background: "#e8e8e8",
-                touchAction: "none",
-                cursor: matchView ? "default" : "grab",
-              }
-        }
+        style={{
+          cursor: matchView ? "default" : "grab",
+        }}
       >
         <Canvas
           shadows
@@ -362,8 +452,18 @@ export function Court3D({
             <CourtMesh length={length} width={width} />
           ) : null}
           {splatUrl && showSplat ? <GaussianSplat url={splatUrl} /> : null}
-          <Players markers={markers} />
-          {ballPos ? <Ball ball={ballPos} /> : null}
+          {showPlayers ? (
+            <Players markers={markers} roster={tracks?.players} />
+          ) : null}
+          {showBallVballnet && ballPos ? (
+            <Ball ball={ballPos} color="#f5c518" />
+          ) : null}
+          {showBallYolo && ballYoloPos ? (
+            <Ball ball={ballYoloPos} color="#00c8ff" />
+          ) : null}
+          {showBallWasb && ballWasbPos ? (
+            <Ball ball={ballWasbPos} color="#ff5aa0" />
+          ) : null}
           {cameraPose ? (
             <MatchedCamera pose={cameraPose} enabled={matchView} />
           ) : null}

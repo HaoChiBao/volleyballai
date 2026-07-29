@@ -79,19 +79,27 @@ def run_modal_ai_parallel(
     *,
     video_id: str,
     fps: float = 10.0,
-    stages: tuple[str, ...] = ("court", "players", "ball"),
+    stages: tuple[str, ...] = (
+        "court",
+        "players",
+        "ball",
+        "ball_yolo",
+        "ball_wasb",
+    ),
     court_sample_fps: float | None = None,
     court_max_frames: int | None = None,
     court_confidence: float | None = None,
     court_return_overlays: int = 2,
 ) -> dict[str, dict[str, Any]]:
     """
-    Spawn court / players / ball on Modal at the same time, then wait for all.
+    Spawn court / players / ball trackers on Modal at the same time, then wait.
 
     Each stage is a separate Modal function (own container):
-      - detect_court  → CPU YOLO pose
-      - track_players → A100 SAM 3.1
-      - track_ball    → CPU VballNet
+      - detect_court    → CPU YOLO pose
+      - track_players   → A100 SAM 3.1
+      - track_ball      → CPU VballNet
+      - track_ball_yolo → CPU SetOptics YOLO (soft-fail if undeployed)
+      - track_ball_wasb → GPU WASB HRNet (soft-fail if undeployed)
 
     Wall-clock ≈ max(stage times), not the sum.
     """
@@ -147,16 +155,23 @@ def run_modal_ai_parallel(
         )
         prompt = os.environ.get("SAM3_PROMPT", "person")
         sam_fps = float(os.environ.get("SAM3_FPS", "8"))
+        try:
+            sam_max_width = int(os.environ.get("SAM3_MAX_WIDTH", "0") or "0")
+        except ValueError:
+            sam_max_width = 0
         calls["players"] = players_fn.spawn(
             video_bytes=video_bytes,
             video_id=video_id,
             prompt=prompt,
             fps=fps,
             sam_fps=sam_fps,
+            sam_max_width=sam_max_width,
             pipeline_version=pipeline_version,
         )
+        mw = sam_max_width if sam_max_width > 0 else "full"
         print(
-            f"[modal] spawned track_players sam_fps={sam_fps} prompt={prompt!r}",
+            f"[modal] spawned track_players sam_fps={sam_fps} "
+            f"max_w={mw} prompt={prompt!r}",
             flush=True,
         )
 
@@ -178,6 +193,45 @@ def run_modal_ai_parallel(
             flush=True,
         )
 
+    if "ball_yolo" in wanted and os.environ.get("DISABLE_BALL_YOLO", "0") != "1":
+        yolo_fn_name = os.environ.get("MODAL_TRACK_BALL_YOLO_FN", "track_ball_yolo")
+        try:
+            yolo_fn = _modal_fn(app, yolo_fn_name)
+            calls["ball_yolo"] = yolo_fn.spawn(
+                video_bytes=video_bytes,
+                video_id=video_id,
+                fps=fps,
+                pipeline_version=pipeline_version,
+            )
+            print("[modal] spawned track_ball_yolo (SetOptics)", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[modal] track_ball_yolo unavailable (skipping): {exc}",
+                flush=True,
+            )
+
+    if "ball_wasb" in wanted and os.environ.get("DISABLE_BALL_WASB", "0") != "1":
+        wasb_fn_name = os.environ.get("MODAL_TRACK_BALL_WASB_FN", "track_ball_wasb")
+        try:
+            wasb_fn = _modal_fn(app, wasb_fn_name)
+            wasb_step = int(os.environ.get("WASB_STEP", "1") or "1")
+            calls["ball_wasb"] = wasb_fn.spawn(
+                video_bytes=video_bytes,
+                video_id=video_id,
+                fps=fps,
+                pipeline_version=pipeline_version,
+                step=wasb_step,
+            )
+            print(
+                f"[modal] spawned track_ball_wasb (WASB step={wasb_step})",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[modal] track_ball_wasb unavailable (skipping): {exc}",
+                flush=True,
+            )
+
     if not calls:
         return {}
 
@@ -188,6 +242,7 @@ def run_modal_ai_parallel(
 
     results: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
+    soft_fail = {"ball_yolo", "ball_wasb"}
 
     def _await(name: str, call: Any) -> tuple[str, dict[str, Any]]:
         try:
@@ -213,8 +268,11 @@ def run_modal_ai_parallel(
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
-                errors.append(str(exc))
-                print(f"[modal] {name} FAILED: {exc}", flush=True)
+                if name in soft_fail:
+                    print(f"[modal] {name} FAILED (soft): {exc}", flush=True)
+                else:
+                    errors.append(str(exc))
+                    print(f"[modal] {name} FAILED: {exc}", flush=True)
 
     total = time.perf_counter() - t0
     print(
@@ -234,5 +292,11 @@ def run_modal_ai_parallel(
         raise RuntimeError("Modal track_players returned unexpected payload")
     if "ball" in wanted and "frames" not in results.get("ball", {}):
         raise RuntimeError("Modal track_ball returned unexpected payload")
+    if "ball_yolo" in results and "frames" not in results["ball_yolo"]:
+        print("[modal] ball_yolo payload missing frames — dropping", flush=True)
+        results.pop("ball_yolo", None)
+    if "ball_wasb" in results and "frames" not in results["ball_wasb"]:
+        print("[modal] ball_wasb payload missing frames — dropping", flush=True)
+        results.pop("ball_wasb", None)
 
     return results

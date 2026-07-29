@@ -1,13 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Job } from "@volleyballai/types";
+import type { Job, PipelineStageTarget } from "@volleyballai/types";
 import {
   formatRunDateTime,
   formatRunDuration,
   formatRunModels,
   formatRunTiming,
+  formatStageTargets,
 } from "@/lib/formatRun";
+
+const MODEL_REFRESH: {
+  stages: PipelineStageTarget[];
+  label: string;
+  hint: string;
+}[] = [
+  { stages: ["court"], label: "Court", hint: "YOLO court keypoints" },
+  { stages: ["players"], label: "Players", hint: "SAM player tracks" },
+  { stages: ["ball"], label: "VballNet", hint: "Primary ball track" },
+  { stages: ["ball_yolo"], label: "YOLO ball", hint: "SetOptics YOLO ball" },
+  { stages: ["ball_wasb"], label: "WASB", hint: "WASB HRNet ball" },
+];
 
 export function JobPanel({
   videoId,
@@ -59,14 +72,20 @@ export function JobPanel({
     return () => window.clearInterval(id);
   }, [jobs, refresh, wasActive, onJobSettled]);
 
-  async function startJob() {
+  async function queueJob(stages?: PipelineStageTarget[]) {
     setCreating(true);
     setError(null);
     try {
+      const body: { video_id: string; stages?: PipelineStageTarget[] } = {
+        video_id: videoId,
+      };
+      if (stages && stages.length > 0) {
+        body.stages = stages;
+      }
       const res = await fetch("/api/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ video_id: videoId }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(await res.text());
       await refresh();
@@ -79,6 +98,10 @@ export function JobPanel({
 
   const latest = jobs[0];
   const prior = jobs.slice(1, 6);
+  const busy =
+    creating ||
+    latest?.status === "queued" ||
+    latest?.status === "running";
 
   return (
     <div className="card stack">
@@ -113,6 +136,11 @@ export function JobPanel({
               }}
             />
           </div>
+          {latest.stages && latest.stages.length > 0 ? (
+            <p className="meta-line" style={{ margin: 0 }}>
+              Partial · {formatStageTargets(latest.stages)}
+            </p>
+          ) : null}
           {latest.error ? <div className="error">{latest.error}</div> : null}
           {latest.run?.started_at ? (
             <div className="stack" style={{ gap: "0.25rem" }}>
@@ -168,6 +196,9 @@ export function JobPanel({
               {job.run?.started_at
                 ? formatRunTiming(job.run)
                 : formatRunDateTime(job.created_at)}
+              {job.stages && job.stages.length > 0 ? (
+                <> · {formatStageTargets(job.stages)}</>
+              ) : null}
               {job.run?.run_id ? (
                 <>
                   {" "}
@@ -181,10 +212,38 @@ export function JobPanel({
 
       {error ? <div className="error">{error}</div> : null}
 
-      <div className="row">
-        <button type="button" disabled={creating} onClick={() => void startJob()}>
-          {creating ? "Queuing…" : "Queue new analysis"}
+      <div className="stack" style={{ gap: "0.55rem" }}>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void queueJob()}
+        >
+          {creating ? "Queuing…" : "Queue full analysis"}
         </button>
+
+        <div className="stack" style={{ gap: "0.35rem" }}>
+          <p className="meta-line" style={{ margin: 0 }}>
+            Refresh model
+          </p>
+          <div className="model-refresh-row">
+            {MODEL_REFRESH.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                className="secondary compact"
+                disabled={busy}
+                title={item.hint}
+                onClick={() => void queueJob(item.stages)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <p className="hint" style={{ margin: 0 }}>
+            Re-runs only that model; reuses <code>work.mp4</code> and other
+            artifacts. Requires a prior full run (or normalize).
+          </p>
+        </div>
       </div>
 
       {latest?.status === "needs_calibration" ? (

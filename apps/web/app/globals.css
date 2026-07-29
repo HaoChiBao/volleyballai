@@ -97,8 +97,7 @@ main:has(.workspace) {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.75rem;
-  align-items: stretch;
-  min-height: 420px;
+  align-items: start;
 }
 
 @media (max-width: 900px) {
@@ -119,28 +118,22 @@ main:has(.workspace) {
 }
 
 .analysis-player-pane .video-shell.analysis-shell {
-  flex: 1;
-  min-height: 280px;
+  flex: 0 0 auto;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-/* Video establishes the box size; SVG overlays the same rectangle.
-   Avoid object-fit:contain letterboxing (that left overlays on the full shell). */
+/* Video box follows the media’s natural aspect so overlays stay pixel-aligned. */
 .analysis-video-box {
   position: relative;
-  display: inline-block;
+  display: block;
+  width: fit-content;
   max-width: 100%;
-  max-height: min(70vh, 520px);
   margin: 0 auto;
   line-height: 0;
-  vertical-align: top;
   background: #000;
-}
-
-.analysis-player-pane .analysis-video-box {
-  max-height: 100%;
 }
 
 .analysis-video-box video {
@@ -149,32 +142,39 @@ main:has(.workspace) {
   width: auto;
   height: auto;
   max-width: 100%;
-  max-height: min(70vh, 520px);
-  object-fit: fill;
+  max-height: min(48vh, 400px);
+  object-fit: contain;
   cursor: pointer;
-}
-
-.analysis-player-pane .analysis-video-box video,
-.analysis-shell .analysis-video-box video {
-  max-height: 100%;
 }
 
 .analysis-video-box > .analysis-overlay {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 100% !important;
+  height: 100% !important;
   max-width: none;
   max-height: none;
   pointer-events: none;
+  display: block;
+  overflow: hidden;
 }
 
+/* 3D matches a normal video-player frame — not stretched to the taller pane. */
 .court3d-pane .court3d-canvas {
-  flex: 1;
-  min-height: 280px;
   position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: min(48vh, 400px);
+  min-height: 0;
+  margin: 0 auto;
+  overflow: hidden;
   touch-action: none;
   cursor: grab;
+  background: #e8e8e8;
 }
 
 .court3d-pane .court3d-canvas:active {
@@ -186,6 +186,16 @@ main:has(.workspace) {
   width: 100% !important;
   height: 100% !important;
   touch-action: none;
+}
+
+/* Standalone (non-synced) 3D card keeps the same frame. */
+.card > .court3d-canvas {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 360px;
+  background: #e8e8e8;
+  overflow: hidden;
 }
 
 main > .stack {
@@ -506,6 +516,19 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.compact,
+.button.compact {
+  padding: 0.45rem 0.7rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+}
+
+.model-refresh-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
 .file-field {
   display: flex;
   flex-direction: column;
@@ -682,6 +705,24 @@ video {
   color: var(--invert);
 }
 
+.toggle-chip.ball-vballnet.active {
+  background: #f5c518;
+  border-color: #c9a000;
+  color: #1a1a1a;
+}
+
+.toggle-chip.ball-yolo.active {
+  background: #00c8ff;
+  border-color: #0099cc;
+  color: #04202a;
+}
+
+.toggle-chip.ball-wasb.active {
+  background: #ff5aa0;
+  border-color: #cc3377;
+  color: #1a0610;
+}
+
 .toggle-chip.done:not(.active) {
   background: var(--surface-soft);
   color: var(--muted);
@@ -699,6 +740,87 @@ video {
 
 .toggle-chip:disabled {
   opacity: 0.35;
+}
+
+.trail-length-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--ink);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.trail-length-control input[type="range"] {
+  width: 5rem;
+  accent-color: var(--ink);
+  height: 2px;
+  margin: 0;
+}
+
+.trail-length-value {
+  min-width: 2.6rem;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.player-playlist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 0.55rem 0.65rem;
+}
+
+.player-playlist-head {
+  align-items: baseline;
+}
+
+.player-playlist-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+  gap: 0.35rem;
+}
+
+.player-playlist-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 1.7rem;
+  padding: 0.2rem 0.35rem;
+  opacity: 0.45;
+}
+
+.player-playlist-item.visible {
+  opacity: 1;
+  background: var(--surface-soft);
+}
+
+.player-playlist-swatch {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex-shrink: 0;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.player-playlist-label {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.player-playlist-status {
+  margin-left: auto;
+  font-size: 0.68rem;
 }
 
 .player-controls {
@@ -810,6 +932,38 @@ video {
   outline-offset: 1px;
 }
 
+.scrubber-motion-tick.tick-net {
+  top: -1px;
+  width: 3px;
+  height: 1rem;
+  border-radius: 1px;
+  z-index: 2;
+}
+
+.scrubber-motion-tick.tick-net-settle {
+  background: #00b7c2;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85);
+}
+
+.scrubber-motion-tick.tick-net-refresh {
+  background: #e89a1c;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85);
+}
+
+.scrubber-motion-tick.tick-net.active {
+  width: 5px;
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+.scrubber-motion-tick.tick-net-settle.active {
+  outline-color: #00b7c2;
+}
+
+.scrubber-motion-tick.tick-net-refresh.active {
+  outline-color: #e89a1c;
+}
+
 .motion-legend {
   display: flex;
   flex-wrap: wrap;
@@ -850,6 +1004,22 @@ video {
   height: 0.7rem;
   background: var(--ink);
   border: none;
+}
+
+.motion-legend-swatch.net-settle {
+  width: 3px;
+  height: 0.7rem;
+  background: #00b7c2;
+  border: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+
+.motion-legend-swatch.net-refresh {
+  width: 3px;
+  height: 0.7rem;
+  background: #e89a1c;
+  border: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
 }
 
 .motion-live-badge {

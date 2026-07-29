@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { listVideos, listJobsForVideo } from "@/lib/store";
+import { getLatestRunPointer, listVideos, listJobsForVideo } from "@/lib/store";
 import {
   formatRunDateTime,
   formatRunDuration,
@@ -36,8 +36,21 @@ export default async function LibraryPage() {
           {await Promise.all(
             videos.map(async (video) => {
               const jobs = await listJobsForVideo(video.id);
-              const latest = jobs[0];
-              const run = latest?.run ?? null;
+              const latestJob = jobs[0];
+              // CLI / direct pipeline runs write latest_run.json but may not
+              // create a job — prefer the pointer so fresh analyzes show up.
+              const pointer = await getLatestRunPointer(video.id);
+              const run = pointer?.run_id
+                ? {
+                    run_id: pointer.run_id,
+                    started_at: pointer.started_at,
+                    finished_at: pointer.finished_at ?? null,
+                    duration_s: pointer.duration_s ?? null,
+                  }
+                : (latestJob?.run ?? null);
+              const status = pointer?.finished_at
+                ? "completed"
+                : latestJob?.status;
               const clipDur =
                 video.meta.duration_s != null
                   ? `${video.meta.duration_s.toFixed(1)}s clip`
@@ -50,10 +63,8 @@ export default async function LibraryPage() {
                 >
                   <div className="row between">
                     <strong>{video.name}</strong>
-                    {latest ? (
-                      <span className={`badge ${latest.status}`}>
-                        {latest.status}
-                      </span>
+                    {status ? (
+                      <span className={`badge ${status}`}>{status}</span>
                     ) : (
                       <span className="badge">no job</span>
                     )}
@@ -86,10 +97,10 @@ export default async function LibraryPage() {
                         <span className="muted"> · {run.run_id}</span>
                       ) : null}
                     </div>
-                  ) : latest ? (
+                  ) : latestJob ? (
                     <div className="meta-line">
-                      Stage <code>{latest.stage}</code>{" "}
-                      {(latest.progress * 100).toFixed(0)}%
+                      Stage <code>{latestJob.stage}</code>{" "}
+                      {(latestJob.progress * 100).toFixed(0)}%
                     </div>
                   ) : null}
                 </Link>

@@ -54,6 +54,10 @@ sam_image = (
         "python -c \"import pycocotools, psutil; from sam3.model_builder import build_sam3_video_predictor; print('sam3 ready')\"",
     )
     .env({"VOLLEYBALL_SAM_IMAGE": "v7-chunked-sam"})
+    .add_local_file(
+        str(Path(__file__).parent / "stitch_player_tracks.py"),
+        remote_path="/root/stitch_player_tracks.py",
+    )
 )
 
 # Best Acc@5px + 2nd-best baked into the ball image (shared by both Modal fns).
@@ -111,6 +115,106 @@ ball_image = (
     )
 )
 
+# SetOptics YOLO ball detector (kept separate from VballNet ONNX image).
+# https://github.com/dawsonpar/SetOptics — Apache-2.0 volleyball_yolo26n.pt
+_SETOPTICS_YOLO_URL = (
+    "https://github.com/dawsonpar/SetOptics/raw/main/models/volleyball_yolo26n.pt"
+)
+_SETOPTICS_YOLO_PATH = "/models/volleyball_yolo26n.pt"
+
+ball_yolo_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("ffmpeg", "libgl1", "libglib2.0-0", "curl", "ca-certificates")
+    .pip_install(
+        "torch",
+        "torchvision",
+        index_url="https://download.pytorch.org/whl/cpu",
+    )
+    .pip_install(
+        "ultralytics>=8.3.0",
+        "opencv-python-headless==4.10.0.84",
+        "numpy",
+    )
+    .env(
+        {
+            "SETOPTICS_YOLO_PATH": _SETOPTICS_YOLO_PATH,
+            "SETOPTICS_YOLO_CONF": "0.3",
+        },
+    )
+    .run_commands(
+        "mkdir -p /models",
+        f"curl -fsSL -L -o {_SETOPTICS_YOLO_PATH} {_SETOPTICS_YOLO_URL} && "
+        f"test $(stat -c%s {_SETOPTICS_YOLO_PATH}) -gt 1000000",
+        "python -c \""
+        "from ultralytics import YOLO; "
+        f"m=YOLO('{_SETOPTICS_YOLO_PATH}'); "
+        "print('setoptics yolo ball model ready', m.task)\"",
+        "ls -la /models",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "yolo_ball.py"),
+        remote_path="/root/yolo_ball.py",
+    )
+)
+
+# WASB volleyball ball tracker (BMVC2023 HRNet) — GPU, raw comparison path.
+# https://github.com/nttcom/WASB-SBDT — MIT; volleyball checkpoint via Google Drive.
+_WASB_GDRIVE = "https://drive.google.com/uc?id=1M9y4wPJqLc0K-z-Bo5DP8Ft5XwJuLqIS"
+_WASB_MODEL_PATH = "/models/wasb_volleyball_best.pth.tar"
+_WASB_SRC = "/opt/wasb-sbdt/src"
+
+ball_wasb_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install(
+        "ffmpeg",
+        "libgl1",
+        "libglib2.0-0",
+        "git",
+        "curl",
+        "ca-certificates",
+    )
+    .pip_install(
+        "torch",
+        "torchvision",
+        index_url="https://download.pytorch.org/whl/cu121",
+    )
+    .pip_install(
+        "opencv-python-headless==4.10.0.84",
+        "numpy",
+        "omegaconf",
+        "gdown",
+        "Pillow",
+        "einops",
+        "timm",
+    )
+    .env(
+        {
+            "WASB_MODEL_PATH": _WASB_MODEL_PATH,
+            "WASB_SRC": _WASB_SRC,
+            "WASB_STEP": "1",
+            "WASB_SCORE_THRESHOLD": "0.5",
+        },
+    )
+    .run_commands(
+        "git clone --depth 1 https://github.com/nttcom/WASB-SBDT.git /opt/wasb-sbdt",
+        "mkdir -p /models",
+        "python -c \""
+        "import gdown, os; "
+        f"gdown.download('{_WASB_GDRIVE}', '{_WASB_MODEL_PATH}', quiet=False); "
+        f"assert os.path.getsize('{_WASB_MODEL_PATH}') > 1_000_000, 'wasb weights too small'\"",
+        "python -c \""
+        "import sys; sys.path.insert(0, '/opt/wasb-sbdt/src'); "
+        "from models.hrnet import HRNet; "
+        "from omegaconf import OmegaConf; "
+        "print('wasb hrnet import ok')\"",
+        "ls -la /models /opt/wasb-sbdt/src/models | head",
+    )
+    .add_local_file(
+        str(Path(__file__).parent / "wasb_ball.py"),
+        remote_path="/root/wasb_ball.py",
+    )
+)
+
 # Court models (all on Modal — never on the laptop):
 #  1) volley-ref YOLOv11n-pose (14 kpts) — current production baseline
 #  2) Kaggle YOLOv8x-pose (4 corners) — fetched via secret `kaggle` / Volume
@@ -133,6 +237,9 @@ _SPATIAL_MOUNT = "/spatial"
 spatial_image = (
     modal.Image.from_registry("dromni/nerfstudio:1.1.5")
     .entrypoint([])
+    .run_commands(
+        "ln -sf $(command -v python3) /usr/local/bin/python || true",
+    )
     .pip_install(
         "opencv-python-headless==4.10.0.84",
         "numpy",
@@ -179,6 +286,9 @@ kimi_fetch_image = (
 kimi_serve_image = (
     modal.Image.from_registry("vllm/vllm-openai:kimi-k3")
     .entrypoint([])
+    .run_commands(
+        "ln -sf $(command -v python3) /usr/local/bin/python || true",
+    )
     .apt_install("libgl1", "libglib2.0-0")
     .pip_install(
         "httpx",
@@ -469,13 +579,22 @@ def _collect_frame_objects(
     return found
 
 
-def _ffmpeg_resample(src: Path, dst: Path, *, fps: float, max_width: int = 640) -> None:
-    """Write a low-FPS copy so SAM does not load the full native stream into VRAM."""
+def _ffmpeg_resample(
+    src: Path,
+    dst: Path,
+    *,
+    fps: float,
+    max_width: int | None = None,
+) -> None:
+    """Write a lower-FPS copy for SAM VRAM. Optional max_width (None = full res)."""
     import subprocess
 
     dst.parent.mkdir(parents=True, exist_ok=True)
-    # scale then fps — keeps court readable while cutting memory ~6× vs 30fps.
-    vf = f"scale='min({max_width},iw)':-2,fps={fps:.3f}"
+    filters: list[str] = []
+    if max_width is not None and max_width > 0:
+        filters.append(f"scale='min({max_width},iw)':-2")
+    filters.append(f"fps={fps:.3f}")
+    vf = ",".join(filters)
     cmd = [
         "ffmpeg",
         "-y",
@@ -489,7 +608,7 @@ def _ffmpeg_resample(src: Path, dst: Path, *, fps: float, max_width: int = 640) 
         "-preset",
         "veryfast",
         "-crf",
-        "28",
+        "18",
         str(dst),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -520,6 +639,74 @@ def _probe_duration_s(path: Path) -> float:
         return float((proc.stdout or "").strip())
     except ValueError:
         return 0.0
+
+
+def _probe_wh(path: Path) -> tuple[int, int]:
+    """Return (width, height) via ffprobe; (0, 0) on failure."""
+    import subprocess
+
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    raw = (proc.stdout or "").strip()
+    try:
+        w_s, h_s = raw.split("x", 1)
+        return int(w_s), int(h_s)
+    except ValueError:
+        return 0, 0
+
+
+def _scale_players_to_native(
+    players: list[dict[str, Any]],
+    *,
+    src_w: int,
+    src_h: int,
+    native_w: int,
+    native_h: int,
+) -> list[dict[str, Any]]:
+    """Map SAM-resample coords into the original video pixel space."""
+    if src_w <= 0 or src_h <= 0 or native_w <= 0 or native_h <= 0:
+        return players
+    if src_w == native_w and src_h == native_h:
+        return players
+    sx = native_w / float(src_w)
+    sy = native_h / float(src_h)
+    out: list[dict[str, Any]] = []
+    for p in players:
+        frames = []
+        for f in p.get("frames") or []:
+            nf = dict(f)
+            bbox = f.get("bbox")
+            if bbox and len(bbox) >= 4:
+                nf["bbox"] = [
+                    round(float(bbox[0]) * sx, 2),
+                    round(float(bbox[1]) * sy, 2),
+                    round(float(bbox[2]) * sx, 2),
+                    round(float(bbox[3]) * sy, 2),
+                ]
+            outline = f.get("outline")
+            if outline:
+                nf["outline"] = [
+                    [round(float(pt[0]) * sx, 1), round(float(pt[1]) * sy, 1)]
+                    for pt in outline
+                    if isinstance(pt, (list, tuple)) and len(pt) >= 2
+                ]
+            frames.append(nf)
+        out.append({**p, "frames": frames})
+    return out
 
 
 def _ffmpeg_slice(src: Path, dst: Path, *, start_s: float, duration_s: float) -> None:
@@ -655,40 +842,76 @@ def track_players(
     prompt: str = DEFAULT_PROMPT,
     fps: float = 10.0,
     sam_fps: float | None = None,
+    sam_max_width: int | None = None,
     pipeline_version: str = PIPELINE_VERSION,
 ) -> dict:
     """Track players with SAM 3.1. Returns players.tracks.json payload."""
     if not video_bytes:
         raise ValueError("Empty video_bytes")
 
-    # SAM 3 video loads the whole clip into VRAM — never feed native 30fps.
-    # Prefer explicit sam_fps from the worker (local SAM3_FPS), else Modal env.
+    # Temporal downsample only (VRAM). Spatial size stays full unless max_width>0.
     requested = (
         float(sam_fps)
         if sam_fps is not None
         else float(os.environ.get("SAM3_FPS", "5"))
     )
-    # Allow up to 15fps when requested; still clamp for VRAM safety.
-    sam_fps_val = max(2.0, min(requested, float(fps) if fps else requested, 15.0))
-    # ~20s @ 5fps ≈ 100 frames per chunk keeps A100 comfortable.
+    # Cap at source fps (worker passes probe fps) and a hard 30 for VRAM.
+    source_fps = float(fps) if fps and fps > 0 else requested
+    sam_fps_val = max(2.0, min(requested, source_fps, 30.0))
+
+    # 0 / None = full native width (no spatial downsample).
+    if sam_max_width is None:
+        max_width_raw = os.environ.get("SAM3_MAX_WIDTH", "0").strip()
+        try:
+            max_width = int(max_width_raw) if max_width_raw else 0
+        except ValueError:
+            max_width = 0
+    else:
+        max_width = int(sam_max_width)
+    if max_width < 0:
+        max_width = 0
+
     chunk_s = float(os.environ.get("SAM3_CHUNK_SECONDS", "20"))
-    # Shorter chunks at higher fps so VRAM stays bounded (~100–120 frames).
-    if sam_fps_val >= 10:
-        chunk_s = min(chunk_s, 12.0)
+    # Target ~60–80 frames/chunk. Full-res frames cost much more VRAM than 640px.
+    target_frames = float(os.environ.get("SAM3_CHUNK_FRAMES", "64"))
+    chunk_s = min(chunk_s, max(3.0, target_frames / max(sam_fps_val, 1.0)))
+    if sam_fps_val >= 15:
+        chunk_s = min(chunk_s, 4.0)
+    elif sam_fps_val >= 10:
+        chunk_s = min(chunk_s, 6.0)
     elif sam_fps_val >= 8:
-        chunk_s = min(chunk_s, 15.0)
-    chunk_s = max(8.0, min(chunk_s, 45.0))
+        chunk_s = min(chunk_s, 8.0)
+    chunk_s = max(3.0, min(chunk_s, 45.0))
     sam_fps = sam_fps_val
+
+    overlap_s = float(os.environ.get("SAM3_CHUNK_OVERLAP_S", "1.5"))
+    overlap_s = max(0.0, min(overlap_s, chunk_s * 0.4))
+    step_s = max(2.0, chunk_s - overlap_s)
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         src = root / "source.mp4"
         low = root / "sam_input.mp4"
         src.write_bytes(video_bytes)
-        print(f"[track_players] resampling to {sam_fps} fps (max_w=640)…")
-        _ffmpeg_resample(src, low, fps=sam_fps, max_width=640)
+        native_w, native_h = _probe_wh(src)
+        mw_label = max_width if max_width > 0 else "full"
+        print(
+            f"[track_players] resampling to {sam_fps} fps "
+            f"(max_w={mw_label}, native={native_w}x{native_h})…",
+        )
+        _ffmpeg_resample(
+            src,
+            low,
+            fps=sam_fps,
+            max_width=max_width if max_width > 0 else None,
+        )
+        sam_w, sam_h = _probe_wh(low)
         duration = _probe_duration_s(low)
-        print(f"[track_players] duration={duration:.1f}s chunk={chunk_s}s")
+        print(
+            f"[track_players] native={native_w}x{native_h} sam={sam_w}x{sam_h} "
+            f"duration={duration:.1f}s chunk={chunk_s}s "
+            f"overlap={overlap_s:.1f}s step={step_s:.1f}s",
+        )
 
         parts: list[dict[int, list[dict[str, Any]]]] = []
         if duration <= 0:
@@ -722,15 +945,45 @@ def track_players(
                     f"{sum(len(v) for v in part.values())}",
                 )
                 parts.append(part)
-                start += chunk_s
+                start += step_s
                 chunk_i += 1
 
         by_id = _merge_track_maps(parts)
 
-    players = [
+    # Cross-chunk / short-occlusion identity stitch (geometry only).
+    import sys
+
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from stitch_player_tracks import stitch_player_tracks as _stitch_players
+
+    raw_players = [
         {"track_id": tid, "frames": frames}
         for tid, frames in sorted(by_id.items(), key=lambda kv: kv[0])
     ]
+    players, stitch_stats = _stitch_players(raw_players)
+    # Stitch ran in SAM pixel space; map to native if a max_width scale was used.
+    if native_w > 0 and native_h > 0 and sam_w > 0 and sam_h > 0:
+        if (sam_w, sam_h) != (native_w, native_h):
+            print(
+                f"[track_players] scaling coords {sam_w}x{sam_h} → "
+                f"{native_w}x{native_h}",
+                flush=True,
+            )
+        players = _scale_players_to_native(
+            players,
+            src_w=sam_w,
+            src_h=sam_h,
+            native_w=native_w,
+            native_h=native_h,
+        )
+    print(
+        f"[track_players] stitch {stitch_stats.get('tracks_before')} → "
+        f"{stitch_stats.get('tracks_after')} "
+        f"(merges={stitch_stats.get('merges')}, "
+        f"dropped_short={stitch_stats.get('dropped_short')})",
+        flush=True,
+    )
     return {
         "video_id": video_id,
         "pipeline_version": pipeline_version,
@@ -739,6 +992,13 @@ def track_players(
         "prompt": prompt,
         "sam_fps": sam_fps,
         "chunk_seconds": chunk_s,
+        "stitch": stitch_stats,
+        "sam_width": sam_w if sam_w else None,
+        "sam_height": sam_h if sam_h else None,
+        "image_width": native_w if native_w else None,
+        "image_height": native_h if native_h else None,
+        "coord_space": "native",
+        "sam_max_width": max_width if max_width > 0 else None,
     }
 
 
@@ -788,6 +1048,120 @@ def track_ball_fast(
         model_key=model_key or _VBALLNET_DEFAULT_KEY,
         label="track_ball_fast",
     )
+
+
+@app.function(image=ball_yolo_image, cpu=4.0, memory=8192, timeout=60 * 60)
+def track_ball_yolo(
+    video_bytes: bytes,
+    video_id: str = "",
+    fps: float = 10.0,
+    pipeline_version: str = PIPELINE_VERSION,
+) -> dict:
+    """
+    SetOptics YOLO + BoT-SORT ball track (comparison path alongside VballNet).
+
+    Returns ball.tracks.json-shaped payload: frames[{t, xy, r}], source=setoptics_yolo.
+    """
+    import sys
+
+    _ = fps
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from yolo_ball import MODEL_NAME, MODEL_SOURCE, track_ball_yolo as _track  # type: ignore
+
+    if not video_bytes:
+        raise ValueError("Empty video_bytes")
+
+    model_path = Path(os.environ.get("SETOPTICS_YOLO_PATH", _SETOPTICS_YOLO_PATH))
+    conf = float(os.environ.get("SETOPTICS_YOLO_CONF", "0.3"))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "work.mp4"
+        path.write_bytes(video_bytes)
+        print(f"[track_ball_yolo] model={model_path} conf={conf}", flush=True)
+        frames_out = _track(
+            path,
+            model_path=model_path,
+            confidence_threshold=conf,
+            gap_fill=True,
+        )
+        print(f"[track_ball_yolo] detections={len(frames_out)}", flush=True)
+
+    return {
+        "video_id": video_id,
+        "pipeline_version": pipeline_version,
+        "frames": frames_out,
+        "source": MODEL_SOURCE,
+        "model": MODEL_NAME,
+        "model_key": "yolo26n",
+        "infer_mode": "botsort",
+    }
+
+
+@app.function(
+    image=ball_wasb_image,
+    gpu="T4",
+    memory=8192,
+    timeout=60 * 90,
+)
+def track_ball_wasb(
+    video_bytes: bytes,
+    video_id: str = "",
+    fps: float = 10.0,
+    pipeline_version: str = PIPELINE_VERSION,
+    step: int | None = None,
+) -> dict:
+    """
+    WASB HRNet volleyball ball track (raw comparison path; no fusion).
+
+    Returns ball.tracks.json-shaped payload: frames[{t, xy, r}], source=wasb_sbdt.
+    Default step=1 (paper oversampling / best AP).
+    """
+    import sys
+
+    _ = fps
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
+    from wasb_ball import (  # type: ignore
+        MODEL_NAME,
+        MODEL_SOURCE,
+        track_ball_wasb as _track,
+    )
+
+    if not video_bytes:
+        raise ValueError("Empty video_bytes")
+
+    model_path = Path(os.environ.get("WASB_MODEL_PATH", _WASB_MODEL_PATH))
+    wasb_src = Path(os.environ.get("WASB_SRC", _WASB_SRC))
+    conf = float(os.environ.get("WASB_SCORE_THRESHOLD", "0.5"))
+    if step is None:
+        step = int(os.environ.get("WASB_STEP", "1") or "1")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "work.mp4"
+        path.write_bytes(video_bytes)
+        print(
+            f"[track_ball_wasb] model={model_path} step={step} conf={conf}",
+            flush=True,
+        )
+        frames_out = _track(
+            path,
+            model_path=model_path,
+            wasb_src=wasb_src,
+            score_threshold=conf,
+            step=int(step),
+        )
+        print(f"[track_ball_wasb] detections={len(frames_out)}", flush=True)
+
+    return {
+        "video_id": video_id,
+        "pipeline_version": pipeline_version,
+        "frames": frames_out,
+        "source": MODEL_SOURCE,
+        "model": MODEL_NAME,
+        "model_key": "wasb_volleyball",
+        "infer_mode": f"step{int(step)}",
+    }
 
 
 @app.function(image=court_image, cpu=2.0, memory=4096, timeout=60 * 20)
@@ -945,7 +1319,8 @@ def compare_court_models(
     cpu=8.0,
     memory=65536,
     # Staging only — full weights land on the Volume mount, not ephemeral disk.
-    ephemeral_disk=200_000,
+    # Modal currently requires ephemeral_disk ∈ [524288, 3145728] MiB.
+    ephemeral_disk=524_288,
 )
 def fetch_kimi_k3() -> dict:
     """
@@ -1017,7 +1392,7 @@ def kimi_k3_volume_status() -> dict:
     memory=524288,  # 512 GiB host RAM for weight staging
     cpu=32.0,
     max_containers=1,
-    ephemeral_disk=100_000,
+    ephemeral_disk=524_288,
 )
 class KimiK3Server:
     """
@@ -1304,7 +1679,7 @@ def analyze_court_with_kimi_k3(
     timeout=60 * 60 * 3,
     memory=65536,
     cpu=8.0,
-    ephemeral_disk=200_000,
+    ephemeral_disk=524_288,
 )
 def build_spatial_scene(
     video_bytes: bytes,
@@ -1417,7 +1792,8 @@ def main(video_path: str = "", prompt: str = DEFAULT_PROMPT):
     if not video_path:
         print(
             "Deployed volleyball-ai: track_players + track_ball (+fast) + "
-            "detect_court + compare_court_models + fetch_kimi_k3 + KimiK3Server + "
+            "track_ball_yolo + track_ball_wasb + detect_court + "
+            "compare_court_models + fetch_kimi_k3 + KimiK3Server + "
             "build_spatial_scene",
         )
         return

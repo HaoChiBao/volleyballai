@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { getBallTracks, getVideo } from "@/lib/store";
+import {
+  getBallTracks,
+  getBallTracksWasb,
+  getBallTracksYolo,
+  getVideo,
+} from "@/lib/store";
 
 export const runtime = "nodejs";
 
@@ -12,6 +17,10 @@ export async function GET(
   if (!video) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  const ball = await getBallTracks(id);
-  return NextResponse.json({ ball });
+  const [ball, ballYolo, ballWasb] = await Promise.all([
+    getBallTracks(id),
+    getBallTracksYolo(id),
+    getBallTracksWasb(id),
+  ]);
+  return NextResponse.json({ ball, ballYolo, ballWasb });
 }

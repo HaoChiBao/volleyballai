@@ -12,6 +12,9 @@ Source of truth for tickets and long-form wiki. Keep this file updated if URLs c
 - [Tickets database](https://app.notion.com/p/b86adbc0f9294bf09e181b1e5a25e4c1) — views: Local v0, Board, By Milestone, P0 Now
 - [Technical Architecture](https://app.notion.com/p/3a7850bd5b088179a775f2e6ca2bd67f)
 - [Work Breakdown — Everything Needed](https://app.notion.com/p/3a7850bd5b0881b3a79beca1b8885064)
+- [Progress Log — July 2026](https://app.notion.com/p/3aa850bd5b08815ba078cdeb239822f3)
+- [Full-res Tracking + Overlay Fix + Dwell Identity Stitch (July 28, 2026)](https://app.notion.com/p/3ab850bd5b08810583c0db29814170a3)
+- [Net Detection + Camera Motion + Court Geometry (July 2026)](https://app.notion.com/p/3ab850bd5b0881569833ec58f346e275)
 
 ## Ticket fields
 

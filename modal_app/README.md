@@ -35,6 +35,7 @@ Functions:
 - `track_players` — SAM 3.1 text-prompted video tracking (`person` by default)
 - `track_ball` — **best quality** VballNet (sliding-window center-frame)
 - `track_ball_fast` — same weights, non-overlapping batches (cheaper / faster)
+- `track_ball_yolo` — SetOptics `volleyball_yolo26n` + BoT-SORT (comparison path; writes `ball.tracks.yolo.json`)
 - `detect_court` — YOLOv11n-pose **14 court keypoints** ([Davidsv/volley-ref-ai](https://huggingface.co/Davidsv/volley-ref-ai))
 - `compare_court_models` — side-by-side **volley-ref + Kaggle YOLOv8x + TennisCourtDetector** (normalized `volleyball_court_v1` schema)
 - `fetch_court_models` — download Kaggle + tennis weights onto Modal Volume `court-extra-models`

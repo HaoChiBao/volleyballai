@@ -54,7 +54,10 @@ def probe(source: Path) -> dict:
 
 
 def normalize(source: Path, work: Path, thumb: Path) -> dict:
-    """Create 720p-ish work.mp4 + jpeg thumbnail."""
+    """Create work.mp4 at native resolution + jpeg thumbnail.
+
+    No spatial downscale — models must see full source resolution.
+    """
     work.parent.mkdir(parents=True, exist_ok=True)
     run(
         [
@@ -62,18 +65,17 @@ def normalize(source: Path, work: Path, thumb: Path) -> dict:
             "-y",
             "-i",
             str(source),
-            "-vf",
-            "scale='min(1280,iw)':-2",
+            # Keep native WxH. Light re-encode for web-safe H.264 + faststart.
             "-c:v",
             "libx264",
             "-preset",
             "veryfast",
             "-crf",
-            "23",
+            "18",
             "-c:a",
             "aac",
             "-b:a",
-            "128k",
+            "192k",
             "-movflags",
             "+faststart",
             str(work),

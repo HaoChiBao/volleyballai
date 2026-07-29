@@ -45,7 +45,8 @@ SEQ_LEN = 9
 HEATMAP_THRESHOLD = 0.5
 RADIUS_MIN = 3.0
 RADIUS_MAX = 48.0
-GAP_FILL_MAX_FRAMES = 8
+# At 60fps, 90 frames ≈ 1.5s — bridge short occlusions so the overlay stays continuous.
+GAP_FILL_MAX_FRAMES = 90
 
 InferMode = Literal["quality", "fast"]
 

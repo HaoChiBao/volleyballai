@@ -6,11 +6,16 @@ import type {
   Calibration,
   Job,
   PipelineStage,
+  PipelineStageTarget,
   PlayersTracksFile,
   Video,
   VideoMeta,
 } from "@volleyballai/types";
-import { DEFAULT_COURT, PIPELINE_VERSION } from "@volleyballai/types";
+import {
+  DEFAULT_COURT,
+  PIPELINE_STAGE_TARGETS,
+  PIPELINE_VERSION,
+} from "@volleyballai/types";
 import {
   dataRoot,
   jobsPath,
@@ -162,12 +167,32 @@ export async function listJobsForVideo(videoId: string): Promise<Job[]> {
   return jobs.filter((j) => j.video_id === videoId);
 }
 
-export async function createJob(videoId: string): Promise<Job> {
+export async function createJob(
+  videoId: string,
+  opts?: { stages?: PipelineStageTarget[] | null },
+): Promise<Job> {
   await ensureDataDirs();
   const video = await getVideo(videoId);
   if (!video) {
     throw new Error(`Video not found: ${videoId}`);
   }
+
+  let stages: PipelineStageTarget[] | null = null;
+  if (opts?.stages && opts.stages.length > 0) {
+    const allowed = new Set<string>(PIPELINE_STAGE_TARGETS);
+    const cleaned = [
+      ...new Set(
+        opts.stages.filter((s): s is PipelineStageTarget => allowed.has(s)),
+      ),
+    ];
+    if (cleaned.length === 0) {
+      throw new Error(
+        `Invalid stages (allowed: ${PIPELINE_STAGE_TARGETS.join(", ")})`,
+      );
+    }
+    stages = cleaned;
+  }
+
   const jobs = await readJsonFile<Job[]>(jobsPath(), []);
   const created_at = nowIso();
   const job: Job = {
@@ -180,6 +205,7 @@ export async function createJob(videoId: string): Promise<Job> {
     retryable: true,
     pipeline_version: PIPELINE_VERSION,
     cloud_run_execution_name: null,
+    stages,
     created_at,
     updated_at: created_at,
   };
@@ -355,6 +381,20 @@ export async function getBallTracks(
   videoId: string,
 ): Promise<BallTracksFile | null> {
   return readArtifactJson<BallTracksFile>(videoId, "ball.tracks.json");
+}
+
+/** SetOptics YOLO ball tracks (comparison artifact alongside VballNet). */
+export async function getBallTracksYolo(
+  videoId: string,
+): Promise<BallTracksFile | null> {
+  return readArtifactJson<BallTracksFile>(videoId, "ball.tracks.yolo.json");
+}
+
+/** WASB HRNet ball tracks (raw comparison artifact; no fusion). */
+export async function getBallTracksWasb(
+  videoId: string,
+): Promise<BallTracksFile | null> {
+  return readArtifactJson<BallTracksFile>(videoId, "ball.tracks.wasb.json");
 }
 
 /** Video-scoped camera motion (like calibration) — not run-scoped yet. */

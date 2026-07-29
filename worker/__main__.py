@@ -52,6 +52,10 @@ def patch_job(client: httpx.Client, job_id: str, **fields: object) -> None:
 def run_job(client: httpx.Client, job: dict) -> None:
     job_id = job["id"]
     video_id = job["video_id"]
+    raw_stages = job.get("stages")
+    stages: list[str] | None = None
+    if isinstance(raw_stages, list) and raw_stages:
+        stages = [str(s) for s in raw_stages]
 
     def on_progress(stage: str, progress: float) -> None:
         patch_job(
@@ -65,7 +69,7 @@ def run_job(client: httpx.Client, job: dict) -> None:
         print(f"[worker] {job_id} {stage} {progress:.0%}", flush=True)
 
     try:
-        result = run_pipeline(video_id, on_progress)
+        result = run_pipeline(video_id, on_progress, stages=stages)
         # If tracks exist but no court projection yet, surface calibration need.
         status = "completed"
         if not result.get("projected"):
@@ -127,8 +131,15 @@ def main() -> int:
                 if job is None:
                     time.sleep(POLL_SECONDS)
                     continue
+                stages = job.get("stages")
+                stages_label = (
+                    ",".join(str(s) for s in stages)
+                    if isinstance(stages, list) and stages
+                    else "full"
+                )
                 print(
-                    f"[worker] claimed job {job['id']} video={job['video_id']}",
+                    f"[worker] claimed job {job['id']} video={job['video_id']} "
+                    f"stages={stages_label}",
                     flush=True,
                 )
                 run_job(client, job)

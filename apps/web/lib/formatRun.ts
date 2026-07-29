@@ -1,4 +1,20 @@
-import type { AnalysisRunInfo } from "@volleyballai/types";
+import type { AnalysisRunInfo, PipelineStageTarget } from "@volleyballai/types";
+
+const STAGE_LABELS: Record<PipelineStageTarget, string> = {
+  normalize: "normalize",
+  court: "court",
+  players: "players",
+  ball: "VballNet",
+  ball_yolo: "YOLO ball",
+  ball_wasb: "WASB",
+};
+
+export function formatStageTargets(
+  stages: PipelineStageTarget[] | null | undefined,
+): string {
+  if (!stages || stages.length === 0) return "full";
+  return stages.map((s) => STAGE_LABELS[s] ?? s).join(", ");
+}
 
 /** Format a run timestamp for UI (local timezone, exact to the second). */
 export function formatRunDateTime(iso: string | null | undefined): string {
@@ -84,7 +100,12 @@ export function formatRunModels(run: AnalysisRunInfo | null | undefined): string
     `players: ${players}`,
     `ball: ${ballParts.join(" / ")}`,
   ];
+  if (m.ball_yolo) parts.push(`ball YOLO: ${m.ball_yolo}`);
+  if (m.ball_wasb) parts.push(`ball WASB: ${m.ball_wasb}`);
   if (court) parts.push(`court: ${court}`);
+  if (run.stages && run.stages.length > 0) {
+    parts.push(`partial: ${formatStageTargets(run.stages)}`);
+  }
   return parts.join(" · ");
 }
 

@@ -3,6 +3,117 @@ from __future__ import annotations
 import math
 from typing import Any
 
+# SAM track_players historically resampled with ffmpeg max_width=640.
+# Full-res is the default now; this constant remains for repairing old tracks.
+SAM_MAX_WIDTH = 640
+
+
+def _sam_resample_size(native_w: int, native_h: int) -> tuple[int, int]:
+    """Legacy SAM max-640 size (used only to repair older track files)."""
+    native_w = max(1, int(native_w))
+    native_h = max(1, int(native_h))
+    if native_w <= SAM_MAX_WIDTH:
+        return native_w, native_h - (native_h % 2)
+    sam_w = SAM_MAX_WIDTH
+    sam_h = int(round(native_h * (sam_w / native_w)))
+    sam_h = max(2, sam_h - (sam_h % 2))
+    return sam_w, sam_h
+
+
+def _track_bbox_extent(tracks: dict[str, Any]) -> tuple[float, float]:
+    max_r = 0.0
+    max_b = 0.0
+    for p in tracks.get("players") or []:
+        for f in p.get("frames") or []:
+            bbox = f.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            max_r = max(max_r, float(bbox[0]) + float(bbox[2]))
+            max_b = max(max_b, float(bbox[1]) + float(bbox[3]))
+            outline = f.get("outline") or []
+            for pt in outline:
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                    max_r = max(max_r, float(pt[0]))
+                    max_b = max(max_b, float(pt[1]))
+    return max_r, max_b
+
+
+def scale_player_tracks_to_native(
+    tracks: dict[str, Any],
+    native_w: int,
+    native_h: int,
+) -> dict[str, Any]:
+    """
+    Ensure player bbox/outline are in native work.mp4 pixels.
+
+    No-op when tracks are already native (current Modal default). Still
+    upscales legacy SAM max-640 track files before H projection / overlay.
+    """
+    native_w = max(1, int(native_w))
+    native_h = max(1, int(native_h))
+
+    src_w = tracks.get("image_width") or tracks.get("sam_width")
+    src_h = tracks.get("image_height") or tracks.get("sam_height")
+    if src_w and src_h:
+        src_w, src_h = int(src_w), int(src_h)
+    else:
+        # Already native (or mock): extents cover most of the frame.
+        max_r, max_b = _track_bbox_extent(tracks)
+        if max_r >= native_w * 0.65 and max_b >= native_h * 0.55:
+            out = {**tracks, "image_width": native_w, "image_height": native_h}
+            return out
+        src_w, src_h = _sam_resample_size(native_w, native_h)
+
+    if src_w <= 0 or src_h <= 0:
+        return tracks
+    if src_w == native_w and src_h == native_h:
+        out = {**tracks, "image_width": native_w, "image_height": native_h}
+        return out
+
+    sx = native_w / float(src_w)
+    sy = native_h / float(src_h)
+
+    def scale_bbox(bbox: list[float]) -> list[float]:
+        return [
+            round(float(bbox[0]) * sx, 2),
+            round(float(bbox[1]) * sy, 2),
+            round(float(bbox[2]) * sx, 2),
+            round(float(bbox[3]) * sy, 2),
+        ]
+
+    def scale_outline(outline: list[Any] | None) -> list[list[float]] | None:
+        if not outline:
+            return outline if outline is not None else None
+        out_pts: list[list[float]] = []
+        for pt in outline:
+            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                out_pts.append([round(float(pt[0]) * sx, 1), round(float(pt[1]) * sy, 1)])
+        return out_pts
+
+    players = []
+    for p in tracks.get("players") or []:
+        frames = []
+        for f in p.get("frames") or []:
+            nf = {**f}
+            if f.get("bbox") and len(f["bbox"]) >= 4:
+                nf["bbox"] = scale_bbox(f["bbox"])
+            if "outline" in f:
+                nf["outline"] = scale_outline(f.get("outline"))
+            # court_xy was projected in the wrong space — drop so caller reprojects.
+            nf.pop("court_xy", None)
+            frames.append(nf)
+        players.append({**p, "frames": frames})
+
+    return {
+        **tracks,
+        "players": players,
+        "sam_width": src_w,
+        "sam_height": src_h,
+        "image_width": native_w,
+        "image_height": native_h,
+        "coord_space": "native",
+    }
+
 
 def _capsule_outline(x: float, y: float, w: float, h: float, n: int = 24) -> list[list[float]]:
     """Rough body silhouette (stadium / capsule) inside a bbox for mock overlays."""

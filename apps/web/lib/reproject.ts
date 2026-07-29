@@ -90,6 +90,8 @@ export async function reprojectArtifacts(
   const artifactDir = await resolveArtifactDir(videoId);
   const tracksPath = path.join(artifactDir, "players.tracks.json");
   const ballPath = path.join(artifactDir, "ball.tracks.json");
+  const ballYoloPath = path.join(artifactDir, "ball.tracks.yolo.json");
+  const ballWasbPath = path.join(artifactDir, "ball.tracks.wasb.json");
   const court3dPath = path.join(artifactDir, "court3d.json");
   const calPath = path.join(root, "calibration.json");
 
@@ -128,14 +130,16 @@ export async function reprojectArtifacts(
     await fs.writeFile(path.join(root, "players.tracks.json"), tracksJson);
   }
 
-  let ball: BallTracksFile | null = null;
-  try {
-    ball = JSON.parse(await fs.readFile(ballPath, "utf8")) as BallTracksFile;
-  } catch {
-    ball = null;
-  }
-
-  if (ball) {
+  async function projectBallFile(
+    filePath: string,
+    mirrorName: string,
+  ): Promise<BallTracksFile | null> {
+    let ball: BallTracksFile | null = null;
+    try {
+      ball = JSON.parse(await fs.readFile(filePath, "utf8")) as BallTracksFile;
+    } catch {
+      return null;
+    }
     ball = {
       ...ball,
       pipeline_version: PIPELINE_VERSION,
@@ -162,11 +166,16 @@ export async function reprojectArtifacts(
       }),
     };
     const ballJson = JSON.stringify(ball, null, 2) + "\n";
-    await fs.writeFile(ballPath, ballJson);
+    await fs.writeFile(filePath, ballJson);
     if (artifactDir !== root) {
-      await fs.writeFile(path.join(root, "ball.tracks.json"), ballJson);
+      await fs.writeFile(path.join(root, mirrorName), ballJson);
     }
+    return ball;
   }
+
+  const ball = await projectBallFile(ballPath, "ball.tracks.json");
+  await projectBallFile(ballYoloPath, "ball.tracks.yolo.json");
+  await projectBallFile(ballWasbPath, "ball.tracks.wasb.json");
 
   const samples: {
     t: number;

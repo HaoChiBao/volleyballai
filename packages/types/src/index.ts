@@ -23,6 +23,36 @@ export type PipelineStage =
   | "project_3d"
   | "done";
 
+/**
+ * Selectable analysis targets for modular / partial jobs.
+ * Omit / null on a Job = full pipeline (all Modal AI stages).
+ */
+export type PipelineStageTarget =
+  | "normalize"
+  | "court"
+  | "players"
+  | "ball"
+  | "ball_yolo"
+  | "ball_wasb";
+
+export const PIPELINE_STAGE_TARGETS: PipelineStageTarget[] = [
+  "normalize",
+  "court",
+  "players",
+  "ball",
+  "ball_yolo",
+  "ball_wasb",
+];
+
+/** Modal AI stages that can be refreshed independently. */
+export const MODAL_STAGE_TARGETS: PipelineStageTarget[] = [
+  "court",
+  "players",
+  "ball",
+  "ball_yolo",
+  "ball_wasb",
+];
+
 export interface VideoMeta {
   duration_s?: number;
   fps?: number;
@@ -48,6 +78,10 @@ export interface Video {
 export interface AnalysisRunModels {
   players: string;
   ball: string;
+  /** SetOptics YOLO ball track (comparison path), when present */
+  ball_yolo?: string | null;
+  /** WASB HRNet ball track (raw comparison path), when present */
+  ball_wasb?: string | null;
   /** Court keypoint detector (e.g. yolo_court_keypoints) */
   court?: string | null;
   /** e.g. sam sample rate */
@@ -74,6 +108,8 @@ export interface AnalysisRunInfo {
   pipeline_version: string;
   mock?: boolean;
   models: AnalysisRunModels;
+  /** When set, this run only refreshed these stage targets. */
+  stages?: PipelineStageTarget[] | null;
 }
 
 export interface Job {
@@ -89,6 +125,11 @@ export interface Job {
   cloud_run_execution_name?: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Partial run targets. Null/omitted = full pipeline.
+   * e.g. `["ball_wasb"]` refreshes only WASB ball tracks.
+   */
+  stages?: PipelineStageTarget[] | null;
   /** Set when the worker starts / finishes an analysis pass. */
   run?: AnalysisRunInfo | null;
 }
@@ -170,7 +211,25 @@ export interface PlayersTracksFile {
   /** When this track file was produced + models used. */
   run?: AnalysisRunInfo;
   sam_fps?: number;
+  chunk_seconds?: number;
+  prompt?: string;
   model?: string;
+  /** Pixel space of bbox/outline after scale-up (native work.mp4 size). */
+  image_width?: number;
+  image_height?: number;
+  /** SAM resample size before scale-up (legacy max-width 640 runs). */
+  sam_width?: number;
+  sam_height?: number;
+  coord_space?: "native" | "sam" | string;
+  /** Geometry stitch stats (cross-chunk / occlusion linking). */
+  stitch?: {
+    tracks_before?: number;
+    tracks_after?: number;
+    merges?: number;
+    dropped_short?: number;
+    dropped_off_court?: number;
+    [key: string]: number | undefined;
+  };
 }
 
 export interface BallFrame {
@@ -186,7 +245,14 @@ export interface BallTracksFile {
   video_id: string;
   pipeline_version: string;
   frames: BallFrame[];
-  source?: "mock" | "modal" | "modal-motion" | "vballnet" | string;
+  source?:
+    | "mock"
+    | "modal"
+    | "modal-motion"
+    | "vballnet"
+    | "setoptics_yolo"
+    | "wasb_sbdt"
+    | string;
   /** When this track file was produced + models used. */
   run?: AnalysisRunInfo;
   model?: string;
